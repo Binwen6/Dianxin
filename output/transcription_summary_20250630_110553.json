@@ -1,0 +1,9 @@
+{
+  "total_files": 2,
+  "successful_transcriptions": 1,
+  "failed_transcriptions": 1,
+  "timestamp": "2025-06-30T11:05:53.553049",
+  "model_used": "openai/whisper-large-v3-turbo",
+  "device_used": "cpu",
+  "return_timestamps": true
+}
