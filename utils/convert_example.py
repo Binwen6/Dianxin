@@ -79,8 +79,8 @@ if __name__ == "__main__":
     # 运行示例
     try:
         example_basic_conversion()
-        example_high_quality_conversion()
-        example_custom_conversion()
+        # example_high_quality_conversion()
+        # example_custom_conversion()
         
         print("\n所有示例执行完成!")
         print("请检查输出目录查看转换结果")

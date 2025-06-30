@@ -15,7 +15,7 @@ def example_with_timestamps():
     transcriber = WhisperTranscriber(return_timestamps=True)
     
     # 转录单个文件
-    audio_file = "datasets/mp3/test.mp3"
+    audio_file = "datasets/mp3/test3.mp3"
     if Path(audio_file).exists():
         print(f"转录文件: {audio_file}")
         result = transcriber.transcribe_file(audio_file)
@@ -32,11 +32,11 @@ def example_with_timestamps():
                 for i, segment in enumerate(result['segment_timestamps'], 1):
                     print(f"  段落 {i}: [{segment['start']:.2f}s - {segment['end']:.2f}s] {segment['text']}")
             
-            # 显示词级别时间戳（前10个词）
-            if 'word_timestamps' in result:
-                print(f"\n词级别时间戳（前10个）:")
-                for i, word_info in enumerate(result['word_timestamps'][:10], 1):
-                    print(f"  词 {i}: [{word_info['start']:.2f}s - {word_info['end']:.2f}s] {word_info['word']}")
+            # 显示词级别时间戳（前100个词）
+            # if 'word_timestamps' in result:
+            #     print(f"\n词级别时间戳（前100个）:")
+            #     for i, word_info in enumerate(result['word_timestamps'][:100], 1):
+            #         print(f"  词 {i}: [{word_info['start']:.2f}s - {word_info['end']:.2f}s] {word_info['word']}")
         else:
             print(f"转录失败: {result['error']}")
     else:
@@ -50,7 +50,7 @@ def example_without_timestamps():
     transcriber = WhisperTranscriber(return_timestamps=False)
     
     # 转录单个文件
-    audio_file = "datasets/mp3/test.mp3"
+    audio_file = "datasets/mp3/test3.mp3"
     if Path(audio_file).exists():
         print(f"转录文件: {audio_file}")
         result = transcriber.transcribe_file(audio_file)
@@ -159,9 +159,9 @@ def main():
     
     # 运行各种示例
     example_with_timestamps()
-    example_without_timestamps()
-    example_batch_processing()
-    example_srt_generation()
+    # example_without_timestamps()
+    # example_batch_processing()
+    # example_srt_generation()
     
     print("\n" + "=" * 50)
     print("演示完成！")

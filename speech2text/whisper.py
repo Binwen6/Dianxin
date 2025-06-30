@@ -104,8 +104,8 @@ class WhisperTranscriber:
                 transcription_result["chunks"] = result["chunks"]
                 
                 # 生成词级别时间戳
-                word_timestamps = self._extract_word_timestamps(result)
-                transcription_result["word_timestamps"] = word_timestamps
+                # word_timestamps = self._extract_word_timestamps(result)
+                # transcription_result["word_timestamps"] = word_timestamps
                 
                 # 生成段落级别时间戳
                 segment_timestamps = self._extract_segment_timestamps(result)
