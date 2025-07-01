@@ -246,6 +246,12 @@ class WhisperTranscriber:
         with open(json_file, 'w', encoding='utf-8') as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
         
+        # 保存为transcripts.json格式（包含时间戳）
+        transcripts_file = output_path / "transcripts.json"
+        transcripts_data = self._format_transcripts_json(results)
+        with open(transcripts_file, 'w', encoding='utf-8') as f:
+            json.dump(transcripts_data, f, ensure_ascii=False, indent=2)
+        
         # 保存为文本文件
         txt_file = output_path / f"transcription_text_{timestamp}.txt"
         with open(txt_file, 'w', encoding='utf-8') as f:
@@ -293,8 +299,63 @@ class WhisperTranscriber:
         
         logger.info(f"结果已保存到 {output_dir}")
         logger.info(f"JSON文件: {json_file}")
+        logger.info(f"transcripts.json: {transcripts_file}")
         logger.info(f"文本文件: {txt_file}")
         logger.info(f"摘要文件: {summary_file}")
+    
+    def _format_transcripts_json(self, results: List[Dict]) -> Dict:
+        """
+        格式化transcripts.json数据
+        
+        Args:
+            results: 转录结果列表
+            
+        Returns:
+            格式化的transcripts.json数据
+        """
+        transcripts_data = {
+            "metadata": {
+                "total_files": len(results),
+                "successful_transcriptions": len([r for r in results if 'error' not in r]),
+                "failed_transcriptions": len([r for r in results if 'error' in r]),
+                "timestamp": datetime.datetime.now().isoformat(),
+                "model_used": self.model_id,
+                "device_used": self.device,
+                "return_timestamps": self.return_timestamps
+            },
+            "transcripts": []
+        }
+        
+        for result in results:
+            transcript_entry = {
+                "file_name": result.get('file_name', 'Unknown'),
+                "file_path": result.get('file_path', 'Unknown'),
+                "file_size_bytes": result.get('file_size_bytes', 0),
+                "timestamp": result.get('timestamp', ''),
+                "model_used": result.get('model_used', self.model_id),
+                "device_used": result.get('device_used', self.device)
+            }
+            
+            if 'error' in result:
+                transcript_entry["status"] = "error"
+                transcript_entry["error"] = result['error']
+                transcript_entry["transcription"] = ""
+                transcript_entry["segments"] = []
+            else:
+                transcript_entry["status"] = "success"
+                transcript_entry["transcription"] = result.get('transcription', '')
+                transcript_entry["confidence"] = result.get('confidence', None)
+                transcript_entry["processing_time"] = result.get('processing_time', None)
+                
+                # 添加时间戳信息
+                if result.get('return_timestamps', False) and 'segment_timestamps' in result:
+                    transcript_entry["segments"] = result['segment_timestamps']
+                else:
+                    transcript_entry["segments"] = []
+            
+            transcripts_data["transcripts"].append(transcript_entry)
+        
+        return transcripts_data
     
     def _save_srt_file(self, results: List[Dict], srt_file: Path):
         """
