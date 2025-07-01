@@ -20,7 +20,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('m4a_conversion.log', encoding='utf-8'),
+        logging.FileHandler('log/m4a_conversion.log', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
