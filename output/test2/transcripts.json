@@ -1,0 +1,143 @@
+{
+  "metadata": {
+    "total_files": 1,
+    "successful_transcriptions": 1,
+    "failed_transcriptions": 0,
+    "total_words": 144,
+    "total_characters": 718,
+    "total_audio_duration": 117.5091552734375,
+    "total_processing_time": 5.751831769943237,
+    "timestamp": "2025-07-01T09:53:27.502626",
+    "model_used": "iic/SenseVoiceSmall",
+    "device_used": "cuda:0",
+    "language": "auto",
+    "workflow_step": "speech2text"
+  },
+  "transcripts": [
+    {
+      "file_name": "test2.mp3",
+      "file_path": "/Users/eureka/VSCodeProjects/Dianxin/datasets/mp3/test2.mp3",
+      "file_size_bytes": 1925270,
+      "timestamp": "2025-07-01T09:53:27.502626",
+      "model_used": "iic/SenseVoiceSmall",
+      "device_used": "cuda:0",
+      "language": "auto",
+      "status": "success",
+      "transcription": "I.No need you you've been I shall you In days. Magic man had Soder and nice. Oh my god took at their face. You look like. Love the game. Mon you Man shouldn tie. I you like magazine. and funny rum style and know you held on. So hey, that's be friends.D' see how this one is, grab the passport and my hand I make a back guy group for an Thiss gonna be forever gonna die You can tell me what's over.😊The high was worth the pay. Good along. They tax so lovers Don't tell you I me say Ca I love the players and you love the game time.You never take this way too far, youll leave your birthdays or raise the nasty scar. could alone this tax lovers. Don't tell you anything, but got the bank space, baby.And write your name.",
+      "processing_time": 5.751831769943237,
+      "word_count": 144,
+      "character_count": 718,
+      "audio_duration": 117.5091552734375,
+      "segments": [
+        {
+          "text": "I",
+          "start": 0.0,
+          "end": 0.17,
+          "duration": 0.17
+        },
+        {
+          "text": "No need you you've been I shall you In days",
+          "start": 0.17,
+          "end": 7.52,
+          "duration": 7.34
+        },
+        {
+          "text": "Magic man had Soder and nice",
+          "start": 7.52,
+          "end": 12.3,
+          "duration": 4.78
+        },
+        {
+          "text": "Oh my god took at their face",
+          "start": 12.3,
+          "end": 17.08,
+          "duration": 4.78
+        },
+        {
+          "text": "You look like",
+          "start": 17.08,
+          "end": 19.3,
+          "duration": 2.22
+        },
+        {
+          "text": "Love the game",
+          "start": 19.3,
+          "end": 21.52,
+          "duration": 2.22
+        },
+        {
+          "text": "Mon you Man shouldn tie",
+          "start": 21.52,
+          "end": 25.45,
+          "duration": 3.93
+        },
+        {
+          "text": "I you like magazine",
+          "start": 25.45,
+          "end": 28.69,
+          "duration": 3.25
+        },
+        {
+          "text": "and funny rum style and know you held on",
+          "start": 28.69,
+          "end": 35.53,
+          "duration": 6.83
+        },
+        {
+          "text": "So hey, that's be friends",
+          "start": 35.53,
+          "end": 39.8,
+          "duration": 4.27
+        },
+        {
+          "text": "D' see how this one is, grab the passport and my hand I make a back guy group for an Thiss gonna be forever gonna die You can tell me what's over",
+          "start": 39.8,
+          "end": 64.56,
+          "duration": 24.77
+        },
+        {
+          "text": "😊The high was worth the pay",
+          "start": 64.56,
+          "end": 69.17,
+          "duration": 4.61
+        },
+        {
+          "text": "Good along",
+          "start": 69.17,
+          "end": 70.88,
+          "duration": 1.71
+        },
+        {
+          "text": "They tax so lovers Don't tell you I me say Ca I love the players and you love the game time",
+          "start": 70.88,
+          "end": 86.42,
+          "duration": 15.54
+        },
+        {
+          "text": "You never take this way too far, youll leave your birthdays or raise the nasty scar",
+          "start": 86.42,
+          "end": 100.6,
+          "duration": 14.18
+        },
+        {
+          "text": "could alone this tax lovers",
+          "start": 100.6,
+          "end": 105.21,
+          "duration": 4.61
+        },
+        {
+          "text": "Don't tell you anything, but got the bank space, baby",
+          "start": 105.21,
+          "end": 114.26,
+          "duration": 9.05
+        },
+        {
+          "text": "And write your name",
+          "start": 114.26,
+          "end": 117.51,
+          "duration": 3.25
+        }
+      ]
+    }
+  ]
+}

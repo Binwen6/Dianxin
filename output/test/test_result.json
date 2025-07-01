@@ -1,0 +1,17 @@
+{
+  "source_file": "/Users/eureka/VSCodeProjects/Dianxin/datasets/mp3/test.mp3",
+  "file_name": "test.mp3",
+  "file_size": 276758,
+  "transcription": "可以用吧，就是让他，但是其实我们未来可能要去做本地部署。对先署，那需要需要网络。",
+  "processing_time": 0.9442203044891357,
+  "timestamp": "2025-07-01T09:52:57.436008",
+  "status": "success",
+  "metadata": {
+    "model_used": "iic/SenseVoiceSmall",
+    "language": "auto",
+    "device": "cuda:0",
+    "audio_duration": 16.8919677734375,
+    "word_count": 1,
+    "character_count": 40
+  }
+}

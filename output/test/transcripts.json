@@ -1,0 +1,47 @@
+{
+  "metadata": {
+    "total_files": 1,
+    "successful_transcriptions": 1,
+    "failed_transcriptions": 0,
+    "total_words": 1,
+    "total_characters": 40,
+    "total_audio_duration": 16.8919677734375,
+    "total_processing_time": 0.9442203044891357,
+    "timestamp": "2025-07-01T09:52:57.436008",
+    "model_used": "iic/SenseVoiceSmall",
+    "device_used": "cuda:0",
+    "language": "auto",
+    "workflow_step": "speech2text"
+  },
+  "transcripts": [
+    {
+      "file_name": "test.mp3",
+      "file_path": "/Users/eureka/VSCodeProjects/Dianxin/datasets/mp3/test.mp3",
+      "file_size_bytes": 276758,
+      "timestamp": "2025-07-01T09:52:57.436008",
+      "model_used": "iic/SenseVoiceSmall",
+      "device_used": "cuda:0",
+      "language": "auto",
+      "status": "success",
+      "transcription": "可以用吧，就是让他，但是其实我们未来可能要去做本地部署。对先署，那需要需要网络。",
+      "processing_time": 0.9442203044891357,
+      "word_count": 1,
+      "character_count": 40,
+      "audio_duration": 16.8919677734375,
+      "segments": [
+        {
+          "text": "可以用吧，就是让他，但是其实我们未来可能要去做本地部署",
+          "start": 0.0,
+          "end": 12.0,
+          "duration": 12.0
+        },
+        {
+          "text": "对先署，那需要需要网络",
+          "start": 12.0,
+          "end": 16.89,
+          "duration": 4.89
+        }
+      ]
+    }
+  ]
+}

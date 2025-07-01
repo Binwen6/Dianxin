@@ -27,7 +27,10 @@ class WorkflowSpeechProcessor:
         Args:
             config: 配置字典，如果为None则使用默认配置
         """
-        self.config = config or self._get_default_config()
+        # 获取默认配置并用传入的配置更新
+        self.config = self._get_default_config()
+        if config:
+            self.config.update(config)
         self.model = None
         self.logger = self._setup_logger()
         
@@ -247,21 +250,52 @@ class WorkflowSpeechProcessor:
         output_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
-        # 保存详细结果（JSON格式）
-        json_file = output_dir / f'speech2text_results_{timestamp}.json'
-        with open(json_file, 'w', encoding='utf-8') as f:
+        # 为每个音频文件创建独立的子目录
+        for result in batch_result['processed_files']:
+            if result['status'] == 'success':
+                # 创建以音频文件名命名的子目录
+                audio_name = Path(result['file_name']).stem  # 去掉扩展名
+                audio_dir = output_dir / audio_name
+                audio_dir.mkdir(parents=True, exist_ok=True)
+                
+                # 保存该音频的详细结果
+                json_file = audio_dir / f'{audio_name}_result.json'
+                with open(json_file, 'w', encoding='utf-8') as f:
+                    json.dump(result, f, ensure_ascii=False, indent=2)
+                
+                # 保存该音频的transcripts.json格式
+                transcripts_file = audio_dir / 'transcripts.json'
+                transcripts_data = self._format_single_transcript_json(result)
+                with open(transcripts_file, 'w', encoding='utf-8') as f:
+                    json.dump(transcripts_data, f, ensure_ascii=False, indent=2)
+                
+                # 保存该音频的纯文本格式
+                txt_file = audio_dir / f'{audio_name}_content.txt'
+                with open(txt_file, 'w', encoding='utf-8') as f:
+                    f.write(f"音频文件: {result['file_name']}\n")
+                    f.write(f"处理时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write("=" * 50 + "\n\n")
+                    f.write(f"转写内容:\n{result['transcription']}\n\n")
+                    f.write(f"字数: {result['metadata']['word_count']}\n")
+                    f.write(f"字符数: {result['metadata']['character_count']}\n")
+                    f.write(f"处理时间: {result['processing_time']:.2f}秒\n")
+                    f.write(f"音频时长: {result['metadata']['audio_duration']:.2f}秒\n")
+        
+        # 保存整体批量处理结果（JSON格式）
+        batch_json_file = output_dir / f'batch_results_{timestamp}.json'
+        with open(batch_json_file, 'w', encoding='utf-8') as f:
             json.dump(batch_result, f, ensure_ascii=False, indent=2)
         
-        # 保存transcripts.json格式（包含时间戳）
-        transcripts_file = output_dir / 'transcripts.json'
-        transcripts_data = self._format_transcripts_json(batch_result)
-        with open(transcripts_file, 'w', encoding='utf-8') as f:
-            json.dump(transcripts_data, f, ensure_ascii=False, indent=2)
+        # 保存整体transcripts.json格式（包含所有音频）
+        all_transcripts_file = output_dir / 'all_transcripts.json'
+        all_transcripts_data = self._format_transcripts_json(batch_result)
+        with open(all_transcripts_file, 'w', encoding='utf-8') as f:
+            json.dump(all_transcripts_data, f, ensure_ascii=False, indent=2)
         
-        # 保存纯文本格式（用于PPT生成）
-        txt_file = output_dir / f'speech2text_content_{timestamp}.txt'
-        with open(txt_file, 'w', encoding='utf-8') as f:
-            f.write(f"语音转文字结果 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        # 保存整体纯文本格式（用于PPT生成）
+        all_txt_file = output_dir / f'all_content_{timestamp}.txt'
+        with open(all_txt_file, 'w', encoding='utf-8') as f:
+            f.write(f"批量语音转文字结果 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write("=" * 50 + "\n\n")
             
             for result in batch_result['processed_files']:
@@ -284,11 +318,13 @@ class WorkflowSpeechProcessor:
             'total_characters': batch_result['summary']['total_characters'],
             'total_audio_duration': batch_result['summary']['total_audio_duration'],
             'processing_timestamp': batch_result['timestamp'],
+            'output_structure': 'individual_directories',
             'output_files': {
-                'detailed_results': str(json_file),
-                'transcripts_json': str(transcripts_file),
-                'text_content': str(txt_file),
-                'workflow_metadata': str(workflow_file)
+                'batch_results': str(batch_json_file),
+                'all_transcripts_json': str(all_transcripts_file),
+                'all_text_content': str(all_txt_file),
+                'workflow_metadata': str(workflow_file),
+                'individual_directories': [str(output_dir / Path(r['file_name']).stem) for r in batch_result['processed_files'] if r['status'] == 'success']
             }
         }
         
@@ -297,7 +333,70 @@ class WorkflowSpeechProcessor:
         
         self.logger.info(f"结果已保存到: {output_dir}")
         self.logger.info(f"处理完成: {batch_result['successful']}/{batch_result['total_files']} 个文件成功")
-        self.logger.info(f"transcripts.json: {transcripts_file}")
+        self.logger.info(f"每个音频文件的结果已保存到独立子目录中")
+        self.logger.info(f"整体结果文件: {all_transcripts_file}")
+    
+    def _format_single_transcript_json(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        格式化单个音频的transcripts.json数据
+        
+        Args:
+            result: 单个音频处理结果
+            
+        Returns:
+            格式化的单个音频transcripts.json数据
+        """
+        transcript_entry = {
+            "file_name": result.get('file_name', 'Unknown'),
+            "file_path": result.get('source_file', 'Unknown'),
+            "file_size_bytes": result.get('file_size', 0),
+            "timestamp": result.get('timestamp', ''),
+            "model_used": result.get('metadata', {}).get('model_used', self.config['model_dir']),
+            "device_used": result.get('metadata', {}).get('device', self.config.get('device', 'cuda:0')),
+            "language": result.get('metadata', {}).get('language', self.config.get('language', 'auto'))
+        }
+        
+        if result.get('status') == 'error':
+            transcript_entry["status"] = "error"
+            transcript_entry["error"] = result.get('error', 'Unknown error')
+            transcript_entry["transcription"] = ""
+            transcript_entry["segments"] = []
+            transcript_entry["word_count"] = 0
+            transcript_entry["character_count"] = 0
+            transcript_entry["audio_duration"] = 0
+            transcript_entry["processing_time"] = 0
+        else:
+            transcript_entry["status"] = "success"
+            transcript_entry["transcription"] = result.get('transcription', '')
+            transcript_entry["processing_time"] = result.get('processing_time', 0)
+            transcript_entry["word_count"] = result.get('metadata', {}).get('word_count', 0)
+            transcript_entry["character_count"] = result.get('metadata', {}).get('character_count', 0)
+            transcript_entry["audio_duration"] = result.get('metadata', {}).get('audio_duration', 0)
+            
+            # 生成时间戳信息（基于音频时长和文本长度估算）
+            segments = self._generate_timestamps_for_transcript(
+                result.get('transcription', ''),
+                result.get('metadata', {}).get('audio_duration', 0)
+            )
+            transcript_entry["segments"] = segments
+        
+        return {
+            "metadata": {
+                "total_files": 1,
+                "successful_transcriptions": 1 if result.get('status') == 'success' else 0,
+                "failed_transcriptions": 1 if result.get('status') == 'error' else 0,
+                "total_words": result.get('metadata', {}).get('word_count', 0),
+                "total_characters": result.get('metadata', {}).get('character_count', 0),
+                "total_audio_duration": result.get('metadata', {}).get('audio_duration', 0),
+                "total_processing_time": result.get('processing_time', 0),
+                "timestamp": result.get('timestamp', ''),
+                "model_used": result.get('metadata', {}).get('model_used', self.config['model_dir']),
+                "device_used": result.get('metadata', {}).get('device', self.config.get('device', 'cuda:0')),
+                "language": result.get('metadata', {}).get('language', self.config.get('language', 'auto')),
+                "workflow_step": "speech2text"
+            },
+            "transcripts": [transcript_entry]
+        }
     
     def _format_transcripts_json(self, batch_result: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -470,56 +569,33 @@ def process_audio_for_workflow(audio_input: Union[str, Path],
             output_path.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             
-            # 保存结果
-            json_file = output_path / f'single_result_{timestamp}.json'
+            # 创建以音频文件名命名的子目录
+            audio_name = Path(result['file_name']).stem  # 去掉扩展名
+            audio_dir = output_path / audio_name
+            audio_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 保存该音频的详细结果
+            json_file = audio_dir / f'{audio_name}_result.json'
             with open(json_file, 'w', encoding='utf-8') as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
             
-            # 保存transcripts.json格式
-            transcripts_file = output_path / 'transcripts.json'
-            transcripts_data = {
-                "metadata": {
-                    "total_files": 1,
-                    "successful_transcriptions": 1 if result.get('status') == 'success' else 0,
-                    "failed_transcriptions": 1 if result.get('status') == 'error' else 0,
-                    "total_words": result.get('metadata', {}).get('word_count', 0),
-                    "total_characters": result.get('metadata', {}).get('character_count', 0),
-                    "total_audio_duration": result.get('metadata', {}).get('audio_duration', 0),
-                    "total_processing_time": result.get('processing_time', 0),
-                    "timestamp": result.get('timestamp', ''),
-                    "model_used": result.get('metadata', {}).get('model_used', ''),
-                    "device_used": result.get('metadata', {}).get('device', ''),
-                    "language": result.get('metadata', {}).get('language', ''),
-                    "workflow_step": "speech2text"
-                },
-                "transcripts": [{
-                    "file_name": result.get('file_name', 'Unknown'),
-                    "file_path": result.get('source_file', 'Unknown'),
-                    "file_size_bytes": result.get('file_size', 0),
-                    "timestamp": result.get('timestamp', ''),
-                    "model_used": result.get('metadata', {}).get('model_used', ''),
-                    "device_used": result.get('metadata', {}).get('device', ''),
-                    "language": result.get('metadata', {}).get('language', ''),
-                    "status": result.get('status', 'unknown'),
-                    "transcription": result.get('transcription', ''),
-                    "processing_time": result.get('processing_time', 0),
-                    "word_count": result.get('metadata', {}).get('word_count', 0),
-                    "character_count": result.get('metadata', {}).get('character_count', 0),
-                    "audio_duration": result.get('metadata', {}).get('audio_duration', 0),
-                    "segments": processor._generate_timestamps_for_transcript(
-                        result.get('transcription', ''),
-                        result.get('metadata', {}).get('audio_duration', 0)
-                    ) if result.get('status') == 'success' else [],
-                    "error": result.get('error', '') if result.get('status') == 'error' else None
-                }]
-            }
-            
+            # 保存该音频的transcripts.json格式
+            transcripts_file = audio_dir / 'transcripts.json'
+            transcripts_data = processor._format_single_transcript_json(result)
             with open(transcripts_file, 'w', encoding='utf-8') as f:
                 json.dump(transcripts_data, f, ensure_ascii=False, indent=2)
             
-            txt_file = output_path / f'single_content_{timestamp}.txt'
+            # 保存该音频的纯文本格式
+            txt_file = audio_dir / f'{audio_name}_content.txt'
             with open(txt_file, 'w', encoding='utf-8') as f:
-                f.write(result.get('transcription', ''))
+                f.write(f"音频文件: {result['file_name']}\n")
+                f.write(f"处理时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("=" * 50 + "\n\n")
+                f.write(f"转写内容:\n{result.get('transcription', '')}\n\n")
+                f.write(f"字数: {result.get('metadata', {}).get('word_count', 0)}\n")
+                f.write(f"字符数: {result.get('metadata', {}).get('character_count', 0)}\n")
+                f.write(f"处理时间: {result.get('processing_time', 0):.2f}秒\n")
+                f.write(f"音频时长: {result.get('metadata', {}).get('audio_duration', 0):.2f}秒\n")
         
         return result
     

@@ -1,0 +1,17 @@
+{
+  "source_file": "/Users/eureka/VSCodeProjects/Dianxin/datasets/mp3/test2.mp3",
+  "file_name": "test2.mp3",
+  "file_size": 1925270,
+  "transcription": "I.No need you you've been I shall you In days. Magic man had Soder and nice. Oh my god took at their face. You look like. Love the game. Mon you Man shouldn tie. I you like magazine. and funny rum style and know you held on. So hey, that's be friends.D' see how this one is, grab the passport and my hand I make a back guy group for an Thiss gonna be forever gonna die You can tell me what's over.😊The high was worth the pay. Good along. They tax so lovers Don't tell you I me say Ca I love the players and you love the game time.You never take this way too far, youll leave your birthdays or raise the nasty scar. could alone this tax lovers. Don't tell you anything, but got the bank space, baby.And write your name.",
+  "processing_time": 5.751831769943237,
+  "timestamp": "2025-07-01T09:53:27.502626",
+  "status": "success",
+  "metadata": {
+    "model_used": "iic/SenseVoiceSmall",
+    "language": "auto",
+    "device": "cuda:0",
+    "audio_duration": 117.5091552734375,
+    "word_count": 144,
+    "character_count": 718
+  }
+}
