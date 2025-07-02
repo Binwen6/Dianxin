@@ -1,0 +1,17 @@
+{
+  "source_file": "/Users/eureka/VSCodeProjects/Dianxin/datasets/mp3/output.mp3",
+  "file_name": "output.mp3",
+  "file_size": 2102462,
+  "transcription": "🎼.70年前，空技中股司第一事期开始的。😔🎼他我微 for。。🎼我是我。我我。😔🎼这是我梦这我跟我是你。嗯你从姐放里那个种的目标那么想我。😔",
+  "processing_time": 7.844377756118774,
+  "timestamp": "2025-07-02T15:25:15.410749",
+  "status": "success",
+  "metadata": {
+    "model_used": "iic/SenseVoiceSmall",
+    "language": "auto",
+    "device": "cuda:0",
+    "audio_duration": 128.3240966796875,
+    "word_count": 2,
+    "character_count": 70
+  }
+}
