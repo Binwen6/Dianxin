@@ -12,9 +12,113 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
 from datetime import datetime
 import time
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import functools
 
 from funasr import AutoModel
 from funasr.utils.postprocess_utils import rich_transcription_postprocess
+
+
+def _process_single_audio_worker(audio_path: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    独立的工作进程函数，用于处理单个音频文件
+    
+    Args:
+        audio_path: 音频文件路径
+        config: 配置字典
+        
+    Returns:
+        处理结果字典
+    """
+    audio_path = Path(audio_path)
+    
+    if not audio_path.exists():
+        return {
+            'source_file': str(audio_path),
+            'file_name': audio_path.name,
+            'transcription': '',
+            'processing_time': 0,
+            'timestamp': datetime.now().isoformat(),
+            'status': 'error',
+            'error': f"音频文件不存在: {audio_path}",
+            'metadata': {}
+        }
+    
+    try:
+        # 开始计时（包括模型加载时间）
+        start_time = time.time()
+        
+        # 在子进程中创建新的模型实例，禁用更新检查以加快启动速度
+        model = AutoModel(
+            model=config['model_dir'],
+            trust_remote_code=True,
+            remote_code=config.get('remote_code', './model.py'),
+            vad_model=config.get('vad_model', 'fsmn-vad'),
+            vad_kwargs=config.get('vad_kwargs', {
+                "max_single_segment_time": 30000
+            }),
+            device=config.get('device', 'cuda:0'),
+            disable_update=True,  # 禁用更新检查
+        )
+        
+        # 执行转写
+        res = model.generate(
+            input=str(audio_path),
+            cache={},
+            language=config.get('language', 'auto'),
+            use_itn=config.get('use_itn', True),
+            batch_size_s=config.get('batch_size_s', 60),
+            merge_vad=config.get('merge_vad', True),
+            merge_length_s=config.get('merge_length_s', 15),
+        )
+        
+        # 后处理文本
+        text = rich_transcription_postprocess(res[0]["text"])
+        
+        processing_time = time.time() - start_time
+        
+        # 估算音频时长
+        def estimate_duration(audio_path: Path) -> float:
+            try:
+                file_size = audio_path.stat().st_size
+                estimated_duration = file_size / (128 * 1024 / 8)
+                return max(0, estimated_duration)
+            except:
+                return 0.0
+        
+        # 构建结果
+        result = {
+            'source_file': str(audio_path),
+            'file_name': audio_path.name,
+            'file_size': audio_path.stat().st_size,
+            'transcription': text,
+            'processing_time': processing_time,
+            'timestamp': datetime.now().isoformat(),
+            'status': 'success',
+            'metadata': {
+                'model_used': config['model_dir'],
+                'language': config.get('language', 'auto'),
+                'device': config.get('device', 'cuda:0'),
+                'audio_duration': estimate_duration(audio_path),
+                'word_count': len(text.split()) if text else 0,
+                'character_count': len(text) if text else 0
+            }
+        }
+        
+        return result
+        
+    except Exception as e:
+        return {
+            'source_file': str(audio_path),
+            'file_name': audio_path.name,
+            'transcription': '',
+            'processing_time': 0,
+            'timestamp': datetime.now().isoformat(),
+            'status': 'error',
+            'error': str(e),
+            'metadata': {}
+        }
 
 
 class WorkflowSpeechProcessor:
@@ -36,6 +140,10 @@ class WorkflowSpeechProcessor:
         
     def _get_default_config(self) -> Dict[str, Any]:
         """获取默认配置"""
+        # 检测系统类型，在macOS上默认使用CPU
+        import platform
+        default_device = 'cpu' if platform.system() == 'Darwin' else 'cuda:0'
+        
         return {
             'model_dir': 'iic/SenseVoiceSmall',
             'remote_code': './model.py',
@@ -43,7 +151,7 @@ class WorkflowSpeechProcessor:
             'vad_kwargs': {
                 'max_single_segment_time': 30000
             },
-            'device': 'cuda:0',
+            'device': default_device,
             'language': 'auto',
             'use_itn': True,
             'batch_size_s': 60,
@@ -54,6 +162,10 @@ class WorkflowSpeechProcessor:
             'segment_by_speaker': False,
             'min_segment_length': 1.0,  # 最小片段长度（秒）
             'max_segment_length': 30.0,  # 最大片段长度（秒）
+            # 并行处理配置
+            'parallel_processing': True,  # 是否启用并行处理
+            'max_workers': None,  # 最大工作进程数，None表示使用CPU核心数
+            'chunk_size': 1,  # 每个进程处理的文件数量
         }
     
     def _setup_logger(self) -> logging.Logger:
@@ -209,11 +321,165 @@ class WorkflowSpeechProcessor:
         
         self.logger.info(f"找到 {len(audio_files)} 个音频文件")
         
+        # 检查是否启用并行处理
+        # 对于小文件数量，串行处理可能更快（避免模型加载开销）
+        if (self.config.get('parallel_processing', True) and 
+            len(audio_files) > 1 and 
+            len(audio_files) >= 4):  # 只有文件数量>=4时才使用并行
+            return self._process_audio_directory_parallel(audio_files, output_dir)
+        else:
+            if len(audio_files) > 1:
+                self.logger.info(f"文件数量较少({len(audio_files)})，使用串行处理以避免模型加载开销")
+            return self._process_audio_directory_sequential(audio_files, output_dir)
+    
+    def _process_audio_directory_parallel(self, audio_files: List[Path], 
+                                        output_dir: Path) -> Dict[str, Any]:
+        """
+        并行处理音频目录中的所有音频文件
+        
+        Args:
+            audio_files: 音频文件列表
+            output_dir: 输出目录
+            
+        Returns:
+            批量处理结果字典
+        """
+        self.logger.info("使用并行处理模式")
+        
+        # 确定工作进程数 - 根据设备类型优化并发数
+        max_workers = self.config.get('max_workers')
+        if max_workers is None:
+            # 如果使用GPU，限制并发数以避免GPU内存不足
+            if self.config.get('device', 'cuda:0').startswith('cuda'):
+                max_workers = min(2, len(audio_files))  # GPU模式下最多2个并发
+            else:
+                # CPU模式下可以使用更多并发，但也要考虑内存使用
+                max_workers = min(mp.cpu_count(), len(audio_files), 4)  # CPU模式下最多4个并发
+        
+        self.logger.info(f"使用 {max_workers} 个工作进程进行并行处理")
+        self.logger.info(f"设备: {self.config.get('device', 'cuda:0')}")
+        
+        # 准备参数
+        audio_paths = [str(f) for f in audio_files]
+        
+        # 使用进程池进行并行处理
+        start_time = time.time()
+        results = []
+        
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # 提交所有任务
+            future_to_audio = {
+                executor.submit(_process_single_audio_worker, audio_path, self.config): audio_path 
+                for audio_path in audio_paths
+            }
+            
+            # 收集结果
+            completed_count = 0
+            individual_times = []
+            
+            for future in as_completed(future_to_audio):
+                audio_path = future_to_audio[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                    completed_count += 1
+                    
+                    if result['status'] == 'success':
+                        individual_times.append(result['processing_time'])
+                        self.logger.info(f"完成 [{completed_count}/{len(audio_files)}]: {Path(audio_path).name} (耗时: {result['processing_time']:.2f}s)")
+                    else:
+                        self.logger.error(f"失败 [{completed_count}/{len(audio_files)}]: {Path(audio_path).name} - {result.get('error', 'Unknown error')}")
+                        
+                except Exception as e:
+                    self.logger.error(f"处理失败 {audio_path}: {e}")
+                    results.append({
+                        'source_file': audio_path,
+                        'file_name': Path(audio_path).name,
+                        'transcription': '',
+                        'processing_time': 0,
+                        'timestamp': datetime.now().isoformat(),
+                        'status': 'error',
+                        'error': str(e),
+                        'metadata': {}
+                    })
+                    completed_count += 1
+        
+        total_processing_time = time.time() - start_time
+        
+        # 计算并行效率 - 修正计算方式
+        if individual_times:
+            # 串行处理的真实时间估算：
+            # 模型加载时间（约7秒）+ 所有文件的实际处理时间
+            estimated_model_load_time = 7.0  # 模型加载时间
+            actual_processing_times = sum(individual_times)
+            estimated_sequential_time = estimated_model_load_time + actual_processing_times
+            
+            parallel_efficiency = estimated_sequential_time / total_processing_time if total_processing_time > 0 else 0
+            self.logger.info(f"并行效率估算: {parallel_efficiency:.2f}x")
+            self.logger.info(f"  预估串行时间: {estimated_sequential_time:.2f}s (模型加载: {estimated_model_load_time:.1f}s + 处理: {actual_processing_times:.1f}s)")
+            self.logger.info(f"  实际并行时间: {total_processing_time:.2f}s")
+            
+            # 分析性能瓶颈
+            if parallel_efficiency < 1.0:
+                self.logger.info("并行效率低于1.0，可能的原因:")
+                self.logger.info("1. 模型加载开销大于并行收益")
+                self.logger.info("2. 文件数量较少，建议使用串行处理")
+                self.logger.info("3. 系统资源限制")
+                self.logger.info("4. 预估串行时间可能不准确")
+            else:
+                self.logger.info(f"并行处理可能有效，预估节省了 {parallel_efficiency - 1:.1f} 倍时间")
+                self.logger.info("注意：这是基于估算的串行时间，实际效果需要对比测试验证")
+        
+        # 统计信息
+        successful = [r for r in results if r['status'] == 'success']
+        failed = [r for r in results if r['status'] == 'error']
+        
+        batch_result = {
+            'status': 'completed',
+            'source_directory': str(audio_files[0].parent),
+            'output_directory': str(output_dir),
+            'processed_files': results,
+            'total_files': len(results),
+            'successful': len(successful),
+            'failed': len(failed),
+            'total_processing_time': total_processing_time,
+            'average_processing_time': total_processing_time / len(results) if results else 0,
+            'timestamp': datetime.now().isoformat(),
+            'processing_mode': 'parallel',
+            'max_workers': max_workers,
+            'estimated_parallel_efficiency': parallel_efficiency if individual_times else 0,
+            'summary': {
+                'total_words': sum(r.get('metadata', {}).get('word_count', 0) for r in successful),
+                'total_characters': sum(r.get('metadata', {}).get('character_count', 0) for r in successful),
+                'total_audio_duration': sum(r.get('metadata', {}).get('audio_duration', 0) for r in successful)
+            }
+        }
+        
+        # 保存结果
+        self._save_batch_results(batch_result, output_dir)
+        
+        return batch_result
+    
+    def _process_audio_directory_sequential(self, audio_files: List[Path], 
+                                          output_dir: Path) -> Dict[str, Any]:
+        """
+        串行处理音频目录中的所有音频文件
+        
+        Args:
+            audio_files: 音频文件列表
+            output_dir: 输出目录
+            
+        Returns:
+            批量处理结果字典
+        """
+        self.logger.info("使用串行处理模式")
+        
         # 批量处理
         results = []
         total_processing_time = 0
         
-        for audio_file in audio_files:
+        for i, audio_file in enumerate(audio_files, 1):
+            self.logger.info(f"处理进度 [{i}/{len(audio_files)}]: {audio_file.name}")
             result = self.process_single_audio(audio_file)
             results.append(result)
             total_processing_time += result.get('processing_time', 0)
@@ -224,7 +490,7 @@ class WorkflowSpeechProcessor:
         
         batch_result = {
             'status': 'completed',
-            'source_directory': str(audio_dir),
+            'source_directory': str(audio_files[0].parent),
             'output_directory': str(output_dir),
             'processed_files': results,
             'total_files': len(results),
@@ -233,6 +499,7 @@ class WorkflowSpeechProcessor:
             'total_processing_time': total_processing_time,
             'average_processing_time': total_processing_time / len(results) if results else 0,
             'timestamp': datetime.now().isoformat(),
+            'processing_mode': 'sequential',
             'summary': {
                 'total_words': sum(r.get('metadata', {}).get('word_count', 0) for r in successful),
                 'total_characters': sum(r.get('metadata', {}).get('character_count', 0) for r in successful),
@@ -538,6 +805,11 @@ class WorkflowSpeechProcessor:
                 'language': self.config.get('language', 'auto')
             },
             'supported_formats': ['.mp3', '.wav', '.m4a', '.flac', '.aac', '.ogg'],
+            'parallel_processing': {
+                'enabled': self.config.get('parallel_processing', True),
+                'max_workers': self.config.get('max_workers'),
+                'cpu_count': mp.cpu_count()
+            },
             'timestamp': datetime.now().isoformat()
         }
 
@@ -614,15 +886,50 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='工作流语音转文字处理器')
     parser.add_argument('input', help='输入音频文件或目录')
     parser.add_argument('-o', '--output', help='输出目录')
-    parser.add_argument('--device', default='cuda:0', help='设备 (cuda:0, cpu)')
+    # 检测系统类型，在macOS上默认使用CPU
+    import platform
+    default_device = 'cpu' if platform.system() == 'Darwin' else 'cuda:0'
+    
+    parser.add_argument('--device', default=default_device, help='设备 (cuda:0, cpu)')
     parser.add_argument('--language', default='auto', help='语言')
+    parser.add_argument('--parallel', action='store_true', default=True, help='启用并行处理 (默认启用)')
+    parser.add_argument('--no-parallel', dest='parallel', action='store_false', help='禁用并行处理')
+    parser.add_argument('--max-workers', type=int, default=None, help='最大工作进程数 (默认使用CPU核心数)')
+    parser.add_argument('--sequential', action='store_true', help='强制使用串行处理模式')
     
     args = parser.parse_args()
     
     config = {
         'device': args.device,
-        'language': args.language
+        'language': args.language,
+        'parallel_processing': args.parallel and not args.sequential,
+        'max_workers': args.max_workers
     }
     
+    print(f"配置信息:")
+    print(f"  输入: {args.input}")
+    print(f"  输出: {args.output}")
+    print(f"  设备: {args.device}")
+    print(f"  语言: {args.language}")
+    print(f"  并行处理: {config['parallel_processing']}")
+    if config['max_workers']:
+        print(f"  最大工作进程数: {config['max_workers']}")
+    else:
+        print(f"  最大工作进程数: 自动 (CPU核心数)")
+    print()
+    
     result = process_audio_for_workflow(args.input, args.output, config)
-    print(f"处理完成，状态: {result.get('status', 'unknown')}") 
+    print(f"处理完成，状态: {result.get('status', 'unknown')}")
+    
+    if result.get('status') == 'completed':
+        print(f"处理模式: {result.get('processing_mode', 'unknown')}")
+        print(f"总文件数: {result.get('total_files', 0)}")
+        print(f"成功: {result.get('successful', 0)}")
+        print(f"失败: {result.get('failed', 0)}")
+        print(f"总处理时间: {result.get('total_processing_time', 0):.2f}秒")
+        print(f"平均处理时间: {result.get('average_processing_time', 0):.2f}秒")
+        if result.get('processing_mode') == 'parallel':
+            print(f"并行工作进程数: {result.get('max_workers', 0)}")
+            if result.get('estimated_parallel_efficiency', 0) > 0:
+                print(f"预估并行效率: {result.get('estimated_parallel_efficiency', 0):.2f}x")
+                print(f"注意：这是基于估算的串行时间，实际效果需要对比测试验证") 

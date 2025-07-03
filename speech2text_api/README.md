@@ -233,6 +233,15 @@ python workflow_processor.py audio_directory -o output
 
 # 输出PPT格式数据
 python workflow_interface.py audio.mp3 --ppt-format
+
+# 默认启用并行处理
+python workflow_processor.py audio_directory -o output
+
+# 禁用并行处理
+python workflow_processor.py audio_directory -o output --no-parallel
+
+# 指定工作进程数
+python workflow_processor.py audio_directory -o output --max-workers 4
 ```
 
 ### 参数说明

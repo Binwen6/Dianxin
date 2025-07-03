@@ -1,4 +1,2 @@
 /.DS_Store
-datasets/m4a/test3.m4a
-datasets/mp3/test3.mp3
-datasets/video/*
+datasets/*
