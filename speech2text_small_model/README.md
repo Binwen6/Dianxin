@@ -246,6 +246,8 @@ python workflow_processor.py audio_directory -o output --max-workers 4
 # 启用通义千问内容纠错
 python workflow_processor.py input_audio.mp3 --enable-correction
 
+# 测试版
+python workflow_processor.py /Users/eureka/VSCodeProjects/Dianxin/datasets/mp3/test3.mp3 --enable-correction -o /Users/eureka/VSCodeProjects/Dianxin/output/test3
 ```
 
 ### 参数说明
