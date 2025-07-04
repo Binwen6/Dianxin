@@ -18,6 +18,36 @@ import functools
 import math
 import tempfile
 import shutil
+import re
+
+# 尝试导入python-dotenv库来读取.env文件
+try:
+    from dotenv import load_dotenv
+    DOTENV_AVAILABLE = True
+except ImportError:
+    DOTENV_AVAILABLE = False
+    print("警告: python-dotenv 库未安装，无法读取.env文件。请安装: pip install python-dotenv")
+
+# 加载.env文件
+if DOTENV_AVAILABLE:
+    # 方法1: 尝试从当前目录加载.env文件
+    env_path = Path(__file__).parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+        print(f"已加载.env文件: {env_path}")
+    else:
+        # 方法2: 尝试从项目根目录加载.env文件
+        project_root = Path(__file__).parent.parent
+        root_env_path = project_root / '.env'
+        if root_env_path.exists():
+            load_dotenv(root_env_path)
+            print(f"已加载项目根目录.env文件: {root_env_path}")
+        else:
+            # 方法3: 尝试从工作目录加载
+            load_dotenv()
+            print("尝试从工作目录加载.env文件")
+else:
+    print("python-dotenv不可用，无法加载.env文件")
 
 from funasr import AutoModel
 from funasr.utils.postprocess_utils import rich_transcription_postprocess
@@ -31,14 +61,135 @@ except ImportError:
     AUDIO_LIBS_AVAILABLE = False
     print("警告: librosa 或 soundfile 库未安装，智能分割功能将受限。请安装: pip install librosa soundfile")
 
-# 尝试导入通义千问API库
+# 尝试导入通义千问API
 try:
     import dashscope
     from dashscope import Generation
     DASHSCOPE_AVAILABLE = True
 except ImportError:
     DASHSCOPE_AVAILABLE = False
-    print("警告: dashscope 库未安装，内容纠错功能将不可用。请安装: pip install dashscope")
+    print("警告: dashscope 库未安装，通义千问内容纠错功能将不可用。请安装: pip install dashscope")
+
+
+def count_chinese_words(text: str) -> int:
+    """
+    准确统计中文字数（包括中文、英文、数字等）
+    
+    Args:
+        text: 要统计的文本
+        
+    Returns:
+        字数统计
+    """
+    if not text:
+        return 0
+    
+    # 移除多余的空白字符
+    text = re.sub(r'\s+', ' ', text.strip())
+    
+    # 统计中文字符（包括中文标点）
+    chinese_chars = len(re.findall(r'[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]', text))
+    
+    # 统计英文单词
+    english_words = len(re.findall(r'[a-zA-Z]+', text))
+    
+    # 统计数字
+    numbers = len(re.findall(r'\d+', text))
+    
+    # 统计其他字符（标点符号等）
+    other_chars = len(re.findall(r'[^\u4e00-\u9fff\u3000-\u303f\uff00-\uffef\w\s]', text))
+    
+    # 总字数 = 中文字符 + 英文单词 + 数字 + 其他字符
+    total_words = chinese_chars + english_words + numbers + other_chars
+    
+    return total_words
+
+
+def count_characters(text: str) -> int:
+    """
+    统计字符数（包括所有字符）
+    
+    Args:
+        text: 要统计的文本
+        
+    Returns:
+        字符数统计
+    """
+    if not text:
+        return 0
+    
+    # 移除多余的空白字符但保留换行符
+    text = re.sub(r'[ \t]+', ' ', text)
+    
+    return len(text)
+
+
+def ensure_text_completeness(text: str, max_length: int = 10000) -> str:
+    """
+    确保文本完整性，避免截断
+    
+    Args:
+        text: 原始文本
+        max_length: 最大长度限制
+        
+    Returns:
+        处理后的完整文本
+    """
+    if not text:
+        return text
+    
+    # 移除末尾的不完整句子
+    text = text.strip()
+    
+    # 如果文本以不完整的标点符号结尾，尝试找到最后一个完整句子
+    incomplete_endings = ['，', ',', '。', '.', '！', '!', '？', '?', '；', ';', '：', ':']
+    
+    # 检查是否以不完整的标点符号结尾
+    if text and text[-1] not in incomplete_endings:
+        # 尝试找到最后一个完整句子的结束位置
+        last_complete_pos = -1
+        for ending in incomplete_endings:
+            pos = text.rfind(ending)
+            if pos > last_complete_pos:
+                last_complete_pos = pos
+        
+        # 如果找到了完整句子的结束位置，截取到那里
+        if last_complete_pos > 0:
+            text = text[:last_complete_pos + 1]
+    
+    # 限制最大长度
+    if len(text) > max_length:
+        # 在最大长度范围内找到最后一个完整句子
+        truncated_text = text[:max_length]
+        last_complete_pos = -1
+        for ending in incomplete_endings:
+            pos = truncated_text.rfind(ending)
+            if pos > last_complete_pos:
+                last_complete_pos = pos
+        
+        if last_complete_pos > 0:
+            text = truncated_text[:last_complete_pos + 1]
+        else:
+            text = truncated_text
+    
+    return text
+
+
+def get_safe_max_workers(config: Dict[str, Any], default: int = 3) -> int:
+    """
+    安全地获取最大并发数，确保不为None
+    
+    Args:
+        config: 配置字典
+        default: 默认值
+        
+    Returns:
+        最大并发数
+    """
+    max_workers = config.get('max_workers', default)
+    if max_workers is None:
+        max_workers = default
+    return max_workers
 
 
 def _correct_text_with_dashscope(text: str, config: Dict[str, Any]) -> str:
@@ -62,6 +213,8 @@ def _correct_text_with_dashscope(text: str, config: Dict[str, Any]) -> str:
     api_key = config.get('dashscope_api_key') or os.environ.get('DASHSCOPE_API_KEY')
     if not api_key:
         print("警告: 未配置通义千问API密钥，跳过内容纠错")
+        print(f"调试信息: config中的dashscope_api_key = {config.get('dashscope_api_key')}")
+        print(f"调试信息: 环境变量DASHSCOPE_API_KEY = {os.environ.get('DASHSCOPE_API_KEY')}")
         return text
     
     try:
@@ -88,20 +241,88 @@ def _correct_text_with_dashscope(text: str, config: Dict[str, Any]) -> str:
                 {"role": "user", "content": f"请对以下语音转文字结果进行纠错：\n\n{text}"}
             ],
             temperature=config.get('dashscope_temperature', 0.1),
-            max_tokens=config.get('dashscope_max_tokens', 4000),
+            max_tokens=config.get('dashscope_max_tokens', 10000),
             timeout=config.get('dashscope_timeout', 30)
         )
         
+        # 检查响应状态
+        print(f"通义千问API响应状态码: {response.status_code}")
+        print(f"通义千问API响应类型: {type(response)}")
+        print(f"通义千问API响应属性: {dir(response)}")
+        
         if response.status_code == 200:
-            corrected_text = response.output.choices[0].message.content.strip()
-            
-            # 如果返回的文本为空或异常，返回原文本
-            if not corrected_text:
+            try:
+                # 尝试多种方式获取响应内容
+                corrected_text = None
+                
+                # 方法1: 直接访问response的文本内容（使用字典方式）
+                if hasattr(response, 'get') and callable(response.get):
+                    # response是一个字典对象
+                    corrected_text = response.get('text', '').strip()
+                    if corrected_text:
+                        print("通过response['text']获取到内容")
+                
+                # 方法2: 访问output字段
+                if not corrected_text and hasattr(response, 'get') and callable(response.get):
+                    output = response.get('output', {})
+                    if isinstance(output, dict):
+                        # 尝试从output中获取文本
+                        corrected_text = output.get('text', '').strip()
+                        if corrected_text:
+                            print("通过response['output']['text']获取到内容")
+                        
+                        # 如果没有text，尝试choices结构
+                        if not corrected_text and 'choices' in output:
+                            choices = output['choices']
+                            if choices and len(choices) > 0:
+                                choice = choices[0]
+                                if isinstance(choice, dict) and 'message' in choice:
+                                    message = choice['message']
+                                    if isinstance(message, dict) and 'content' in message:
+                                        corrected_text = message['content'].strip()
+                                        print("通过response['output']['choices'][0]['message']['content']获取到内容")
+                
+                # 方法3: 尝试将response转换为字典
+                if not corrected_text:
+                    try:
+                        # 如果response是对象，尝试获取其字典表示
+                        if hasattr(response, '__dict__'):
+                            response_dict = response.__dict__
+                        elif hasattr(response, 'get') and callable(response.get):
+                            response_dict = response
+                        else:
+                            response_dict = {}
+                        
+                        print(f"response字典内容: {response_dict}")
+                        
+                        # 查找可能的文本字段
+                        for key, value in response_dict.items():
+                            if isinstance(value, str) and len(value) > 10:  # 假设文本内容长度大于10
+                                corrected_text = value.strip()
+                                print(f"通过response['{key}']获取到内容")
+                                break
+                    except Exception as e:
+                        print(f"转换response为字典失败: {e}")
+                
+                # 检查是否获取到内容
+                if corrected_text:
+                    # 如果返回的文本为空或异常，返回原文本
+                    if not corrected_text or corrected_text == text:
+                        print("通义千问API返回内容与原文本相同或为空，使用原文本")
+                        return text
+                    
+                    return corrected_text
+                else:
+                    print("通义千问API响应格式错误：无法获取文本内容")
+                    print(f"response内容: {response}")
+                    return text
+            except Exception as e:
+                print(f"解析通义千问API响应时出错: {e}")
                 return text
-            
-            return corrected_text
         else:
-            print(f"通义千问API调用失败: {response.message}")
+            print(f"通义千问API调用失败: 状态码 {response.status_code}")
+            if hasattr(response, 'message'):
+                print(f"错误信息: {response.message}")
             return text
         
     except Exception as e:
@@ -213,8 +434,8 @@ def _process_single_audio_worker(audio_path: str, config: Dict[str, Any]) -> Dic
                 'language': config.get('language', 'auto'),
                 'device': config.get('device', 'cuda:0'),
                 'audio_duration': estimate_duration(audio_path),
-                'word_count': len(text.split()) if text else 0,
-                'character_count': len(text) if text else 0,
+                'word_count': count_chinese_words(text) if text else 0,
+                'character_count': count_characters(text) if text else 0,
                 'dashscope_correction': correction_info
             }
         }
@@ -277,7 +498,7 @@ class WorkflowSpeechProcessor:
             'max_segment_length': 30.0,  # 最大片段长度（秒）
             # 并行处理配置
             'parallel_processing': True,  # 是否启用并行处理
-            'max_workers': None,  # 最大工作进程数，None表示使用CPU核心数
+            'max_workers': 3,  # 最大工作进程数，统一限制为3个
             'chunk_size': 1,  # 每个进程处理的文件数量
             # 智能分割配置
             'enable_smart_segmentation': True,  # 是否启用智能分割
@@ -286,12 +507,13 @@ class WorkflowSpeechProcessor:
             'min_segment_duration': 30.0,  # 最小分割段时长（秒）
             'max_segment_duration': 300.0,  # 最大分割段时长（秒）
             'overlap_duration': 5.0,  # 分割段之间的重叠时长（秒）
+            'include_segment_markers': False,  # 是否在合并文本中包含分段标识
             # 通义千问内容纠错配置
             'enable_dashscope_correction': False,  # 是否启用通义千问内容纠错
             'dashscope_api_key': None,  # 通义千问API密钥
             'dashscope_model': 'qwen-turbo',  # 使用的模型
             'dashscope_temperature': 0.1,  # 温度参数
-            'dashscope_max_tokens': 4000,  # 最大token数
+            'dashscope_max_tokens': 10000,  # 最大token数
             'dashscope_timeout': 30,  # API超时时间（秒）
         }
     
@@ -387,6 +609,9 @@ class WorkflowSpeechProcessor:
             # 后处理文本
             text = rich_transcription_postprocess(res[0]["text"])
             
+            # 确保文本完整性
+            text = ensure_text_completeness(text)
+            
             # 使用通义千问API进行内容纠错
             if self.config.get('enable_dashscope_correction', False):
                 correction_start_time = time.time()
@@ -426,8 +651,8 @@ class WorkflowSpeechProcessor:
                     'language': self.config.get('language', 'auto'),
                     'device': self.config.get('device', 'cuda:0'),
                     'audio_duration': self._estimate_duration(audio_path),
-                    'word_count': len(text.split()) if text else 0,
-                    'character_count': len(text) if text else 0,
+                    'word_count': count_chinese_words(text) if text else 0,
+                    'character_count': count_characters(text) if text else 0,
                     'dashscope_correction': correction_info,
                     'segmentation_info': {
                         'total_segments': 1,
@@ -465,6 +690,7 @@ class WorkflowSpeechProcessor:
             处理结果字典
         """
         try:
+            start_time = time.time()
             self.logger.info(f"开始智能分割处理长音频: {audio_path.name}")
             
             # 获取音频时长
@@ -473,6 +699,10 @@ class WorkflowSpeechProcessor:
             # 计算最佳分割段数
             processing_time_ratio = self.config.get('processing_time_ratio', 1/17)
             num_segments = self._calculate_optimal_segments(audio_duration, processing_time_ratio)
+            
+            # 获取最大并发数，确保不为None
+            max_workers = get_safe_max_workers(self.config, 3)
+            self.logger.info(f"音频时长: {audio_duration:.2f}s, 最终分段数: {num_segments}, 最大并发数: {max_workers}")
             
             # 分割音频
             segment_paths = self._segment_audio(audio_path, num_segments)
@@ -489,20 +719,8 @@ class WorkflowSpeechProcessor:
                 len(segment_paths) > 1 and 
                 len(segment_paths) >= 2):  # 分割段数量>=2时使用并行
                 
-                # 使用现有的并行处理逻辑
-                segment_results = self._process_audio_directory_parallel(segment_paths, Path(tempfile.gettempdir()))
-                
-                # 提取处理结果
-                if segment_results.get('status') == 'completed':
-                    segment_results = segment_results.get('processed_files', [])
-                else:
-                    # 如果并行处理失败，回退到串行
-                    self.logger.warning("并行处理分割段失败，回退到串行处理")
-                    segment_results = []
-                    for i, segment_path in enumerate(segment_paths):
-                        self.logger.info(f"处理分割段 {i+1}/{len(segment_paths)}: {segment_path.name}")
-                        segment_result = self._process_audio_directly(segment_path)
-                        segment_results.append(segment_result)
+                # 使用专门的分段并行处理逻辑，确保顺序正确
+                segment_results = self._process_segments_parallel(segment_paths)
             else:
                 # 串行处理分割段
                 if len(segment_paths) > 1:
@@ -516,7 +734,11 @@ class WorkflowSpeechProcessor:
             # 合并结果
             merged_result = self._merge_segment_results(segment_results, audio_path)
             
-            self.logger.info(f"智能分割处理完成: {audio_path.name}")
+            # 计算总处理时间（包括分割和合并的时间）
+            total_processing_time = time.time() - start_time
+            merged_result['processing_time'] = total_processing_time
+            
+            self.logger.info(f"智能分割处理完成: {audio_path.name} (总耗时: {total_processing_time:.2f}s)")
             return merged_result
             
         except Exception as e:
@@ -524,6 +746,71 @@ class WorkflowSpeechProcessor:
             # 回退到直接处理
             self.logger.info("回退到直接处理模式")
             return self._process_audio_directly(audio_path)
+    
+    def _process_segments_parallel(self, segment_paths: List[Path]) -> List[Dict[str, Any]]:
+        """
+        并行处理音频分段，确保结果按正确顺序返回
+        
+        Args:
+            segment_paths: 分段音频文件路径列表（已按顺序排列）
+            
+        Returns:
+            按顺序排列的处理结果列表
+        """
+        self.logger.info("使用分段并行处理模式")
+        
+        # 限制最大进程数为配置的最大并发数，且不超过分段数
+        config_max_workers = get_safe_max_workers(self.config, 3)
+        max_workers = min(config_max_workers, len(segment_paths))
+        self.logger.info(f"使用 {max_workers} 个工作进程进行分段并行处理 (分段数: {len(segment_paths)}, 最大并发数: {config_max_workers})")
+        
+        # 准备参数，保持顺序信息
+        segment_tasks = [(i, str(path)) for i, path in enumerate(segment_paths)]
+        
+        # 使用进程池进行并行处理
+        start_time = time.time()
+        results = [None] * len(segment_paths)  # 预分配结果列表，保持顺序
+        
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # 提交所有任务，保持索引信息
+            future_to_index = {
+                executor.submit(_process_single_audio_worker, audio_path, self.config): (index, audio_path)
+                for index, audio_path in segment_tasks
+            }
+            
+            # 收集结果，按原始顺序排列
+            completed_count = 0
+            
+            for future in as_completed(future_to_index):
+                index, audio_path = future_to_index[future]
+                try:
+                    result = future.result()
+                    results[index] = result  # 按原始索引放置结果
+                    completed_count += 1
+                    
+                    if result['status'] == 'success':
+                        self.logger.info(f"完成分段 [{completed_count}/{len(segment_paths)}]: {Path(audio_path).name} (耗时: {result['processing_time']:.2f}s)")
+                    else:
+                        self.logger.error(f"分段失败 [{completed_count}/{len(segment_paths)}]: {Path(audio_path).name} - {result.get('error', 'Unknown error')}")
+                        
+                except Exception as e:
+                    self.logger.error(f"分段处理失败 {audio_path}: {e}")
+                    results[index] = {
+                        'source_file': audio_path,
+                        'file_name': Path(audio_path).name,
+                        'transcription': '',
+                        'processing_time': 0,
+                        'timestamp': datetime.now().isoformat(),
+                        'status': 'error',
+                        'error': str(e),
+                        'metadata': {}
+                    }
+                    completed_count += 1
+        
+        total_processing_time = time.time() - start_time
+        self.logger.info(f"分段并行处理完成，总耗时: {total_processing_time:.2f}s")
+        
+        return results
     
     def process_audio_directory(self, audio_dir: Union[str, Path], 
                               output_dir: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
@@ -590,15 +877,14 @@ class WorkflowSpeechProcessor:
         """
         self.logger.info("使用并行处理模式")
         
-        # 确定工作进程数 - 根据设备类型优化并发数
+        # 确定工作进程数 - 统一限制为最多3个进程
         max_workers = self.config.get('max_workers')
         if max_workers is None:
-            # 如果使用GPU，限制并发数以避免GPU内存不足
-            if self.config.get('device', 'cuda:0').startswith('cuda'):
-                max_workers = min(2, len(audio_files))  # GPU模式下最多2个并发
-            else:
-                # CPU模式下可以使用更多并发，但也要考虑内存使用
-                max_workers = min(mp.cpu_count(), len(audio_files), 4)  # CPU模式下最多4个并发
+            # 统一限制为最多3个进程，无论GPU还是CPU模式
+            max_workers = min(3, len(audio_files))
+        else:
+            # 如果用户指定了max_workers，也要确保不超过3个
+            max_workers = min(max_workers, 3, len(audio_files))
         
         self.logger.info(f"使用 {max_workers} 个工作进程进行并行处理")
         self.logger.info(f"设备: {self.config.get('device', 'cuda:0')}")
@@ -1063,7 +1349,7 @@ class WorkflowSpeechProcessor:
     
     def _calculate_optimal_segments(self, audio_duration: float, processing_time_ratio: float = 1/17) -> int:
         """
-        根据研究结果计算最佳分割段数
+        根据研究结果计算最佳分割段数，并确保不超过最大并发数
         
         Args:
             audio_duration: 音频时长（秒）
@@ -1083,13 +1369,19 @@ class WorkflowSpeechProcessor:
         # 取最近整数
         optimal_segments = round(optimal_segments)
         
-        # 确保至少为1，最多不超过音频时长除以最小段时长
-        min_segments = 1
-        max_segments = max(1, int(audio_duration / self.config.get('min_segment_duration', 30.0)))
+        # 获取最大并发数，确保不为None
+        max_workers = get_safe_max_workers(self.config, 3)
         
+        # 确保至少为1，最多不超过音频时长除以最小段时长，且不超过最大并发数
+        min_segments = 1
+        max_segments_by_duration = max(1, int(audio_duration / self.config.get('min_segment_duration', 30.0)))
+        max_segments_by_concurrency = max_workers
+        
+        # 取最小值，确保不超过最大并发数
+        max_segments = min(max_segments_by_duration, max_segments_by_concurrency)
         optimal_segments = max(min_segments, min(optimal_segments, max_segments))
         
-        self.logger.info(f"音频时长: {audio_duration:.2f}s, 计算得到最佳分割段数: {optimal_segments}")
+        self.logger.info(f"音频时长: {audio_duration:.2f}s, 计算得到最佳分割段数: {optimal_segments} (最大并发数: {max_workers})")
         return optimal_segments
     
     def _should_segment_audio(self, audio_path: Path) -> bool:
@@ -1103,6 +1395,12 @@ class WorkflowSpeechProcessor:
             是否需要分割
         """
         if not self.config.get('enable_smart_segmentation', True):
+            self.logger.info(f"智能分割功能已禁用")
+            return False
+        
+        # 检查并行处理是否被禁用
+        if not self.config.get('parallel_processing', True):
+            self.logger.info(f"并行处理已禁用，智能分割功能也被禁用")
             return False
         
         # 获取音频时长
@@ -1112,16 +1410,19 @@ class WorkflowSpeechProcessor:
         processing_time_ratio = self.config.get('processing_time_ratio', 1/17)
         optimal_segments = self._calculate_optimal_segments(audio_duration, processing_time_ratio)
         
-        # 只有当最佳分割段数 > 2 时才真正启用智能分割
-        should_segment = optimal_segments > 2
+        # 获取最大并发数，确保不为None
+        max_workers = get_safe_max_workers(self.config, 3)
         
-        self.logger.info(f"音频 {audio_path.name} 时长: {audio_duration:.2f}s, 计算得到最佳段数: {optimal_segments}, 是否启用智能分割: {should_segment}")
+        # 只有当最佳分割段数 > 2 且不超过最大并发数时才真正启用智能分割
+        should_segment = optimal_segments > 2 and optimal_segments <= max_workers
+        
+        self.logger.info(f"音频 {audio_path.name} 时长: {audio_duration:.2f}s, 计算得到最佳段数: {optimal_segments}, 最大并发数: {max_workers}, 是否启用智能分割: {should_segment}")
         
         return should_segment
     
     def _segment_audio(self, audio_path: Path, num_segments: int) -> List[Path]:
         """
-        将音频文件分割为指定数量的段
+        将音频文件分割为指定数量的段，确保完整覆盖整个音频时长
         
         Args:
             audio_path: 音频文件路径
@@ -1137,19 +1438,24 @@ class WorkflowSpeechProcessor:
         try:
             # 加载音频
             audio, sr = librosa.load(str(audio_path), sr=None)
-            duration = len(audio) / sr
+            total_duration = len(audio) / sr
+            total_samples = len(audio)
             
-            # 计算每段时长（包含重叠）
+            # 计算重叠时长
             overlap_duration = self.config.get('overlap_duration', 5.0)
             overlap_samples = int(overlap_duration * sr)
             
-            # 计算每段的基础时长
-            base_segment_duration = duration / num_segments
+            # 确保每段时长在合理范围内
+            min_segment_duration = self.config.get('min_segment_duration', 30.0)
+            max_segment_duration = self.config.get('max_segment_duration', 300.0)
+            
+            # 计算每段的基础时长（不包含重叠）
+            base_segment_duration = total_duration / num_segments
             base_segment_samples = int(base_segment_duration * sr)
             
-            # 确保每段时长在合理范围内
-            min_segment_samples = int(self.config.get('min_segment_duration', 30.0) * sr)
-            max_segment_samples = int(self.config.get('max_segment_duration', 300.0) * sr)
+            # 调整基础段时长，确保在合理范围内
+            min_segment_samples = int(min_segment_duration * sr)
+            max_segment_samples = int(max_segment_duration * sr)
             
             base_segment_samples = max(min_segment_samples, 
                                      min(base_segment_samples, max_segment_samples))
@@ -1158,16 +1464,47 @@ class WorkflowSpeechProcessor:
             temp_dir = Path(tempfile.mkdtemp(prefix=f"audio_segments_{audio_path.stem}_"))
             segment_paths = []
             
-            self.logger.info(f"开始分割音频 {audio_path.name} 为 {num_segments} 段")
+            config_max_workers = get_safe_max_workers(self.config, 3)
+            self.logger.info(f"开始分割音频 {audio_path.name} 为 {num_segments} 段 (总时长: {total_duration:.2f}s, 最大并发数: {config_max_workers})")
             
+            # 重新计算实际的分割点，确保完整覆盖
+            segment_boundaries = []
+            for i in range(num_segments + 1):
+                if i == 0:
+                    # 第一段开始
+                    start_sample = 0
+                elif i == num_segments:
+                    # 最后一段结束
+                    start_sample = total_samples
+                else:
+                    # 中间分割点
+                    start_sample = int(i * total_samples / num_segments)
+                segment_boundaries.append(start_sample)
+            
+            # 创建分割段，确保完整覆盖
             for i in range(num_segments):
-                # 计算当前段的起始和结束位置
-                start_sample = i * (base_segment_samples - overlap_samples)
-                end_sample = min(start_sample + base_segment_samples, len(audio))
+                # 当前段的起始和结束位置
+                start_sample = segment_boundaries[i]
+                end_sample = segment_boundaries[i + 1]
                 
-                # 确保最后一段不会太短
-                if i == num_segments - 1 and end_sample - start_sample < min_segment_samples:
-                    start_sample = max(0, end_sample - min_segment_samples)
+                # 添加重叠（除了第一段和最后一段）
+                if i > 0:  # 不是第一段，向前扩展
+                    start_sample = max(0, start_sample - overlap_samples)
+                if i < num_segments - 1:  # 不是最后一段，向后扩展
+                    end_sample = min(total_samples, end_sample + overlap_samples)
+                
+                # 确保段长度合理
+                segment_samples = end_sample - start_sample
+                if segment_samples < min_segment_samples:
+                    # 如果段太短，扩展它
+                    if i == 0:  # 第一段
+                        end_sample = min(total_samples, start_sample + min_segment_samples)
+                    elif i == num_segments - 1:  # 最后一段
+                        start_sample = max(0, end_sample - min_segment_samples)
+                    else:  # 中间段，向两边扩展
+                        extension = (min_segment_samples - segment_samples) // 2
+                        start_sample = max(0, start_sample - extension)
+                        end_sample = min(total_samples, end_sample + extension)
                 
                 # 提取音频段
                 segment_audio = audio[start_sample:end_sample]
@@ -1182,7 +1519,15 @@ class WorkflowSpeechProcessor:
                 segment_duration = len(segment_audio) / sr
                 self.logger.info(f"  段 {i+1}: {segment_duration:.2f}s ({start_sample/sr:.2f}s - {end_sample/sr:.2f}s)")
             
+            # 验证分割是否完整覆盖
+            total_segmented_duration = sum(len(librosa.load(str(path), sr=None)[0]) / sr for path in segment_paths)
+            coverage_ratio = total_segmented_duration / total_duration
             self.logger.info(f"音频分割完成，共生成 {len(segment_paths)} 个文件")
+            self.logger.info(f"总时长覆盖比例: {coverage_ratio:.2%} (原始: {total_duration:.2f}s, 分割后: {total_segmented_duration:.2f}s)")
+            
+            if coverage_ratio < 0.95:
+                self.logger.warning(f"音频分割覆盖比例较低 ({coverage_ratio:.2%})，可能存在内容丢失")
+            
             return segment_paths
             
         except Exception as e:
@@ -1215,7 +1560,7 @@ class WorkflowSpeechProcessor:
         
         # 合并文本
         merged_text = ""
-        total_processing_time = 0
+        segment_processing_times = []  # 收集各段处理时间
         total_word_count = 0
         total_character_count = 0
         successful_segments = 0
@@ -1224,18 +1569,46 @@ class WorkflowSpeechProcessor:
             if result.get('status') == 'success':
                 segment_text = result.get('transcription', '').strip()
                 if segment_text:
-                    # 添加段标识（可选）
+                    # 添加段标识，确保顺序正确
                     if self.config.get('include_segment_markers', False):
                         merged_text += f"[段{i+1}] {segment_text}\n"
                     else:
+                        # 即使不显示段标识，也要确保按顺序合并
                         merged_text += f"{segment_text}\n"
                     
-                    total_processing_time += result.get('processing_time', 0)
+                    segment_processing_times.append(result.get('processing_time', 0))
                     total_word_count += result.get('metadata', {}).get('word_count', 0)
                     total_character_count += result.get('metadata', {}).get('character_count', 0)
                     successful_segments += 1
+                    self.logger.info(f"成功合并分段 {i+1}: {len(segment_text)} 字符 (处理时间: {result.get('processing_time', 0):.2f}s)")
             else:
                 self.logger.warning(f"分割段 {i+1} 处理失败: {result.get('error', 'Unknown error')}")
+                # 为失败的分段添加占位符，保持顺序
+                if self.config.get('include_segment_markers', False):
+                    merged_text += f"[段{i+1} - 处理失败]\n"
+        
+        # 计算总处理时间：并行处理时取最大值，串行处理时取总和
+        if len(segment_processing_times) > 1 and self.config.get('parallel_processing', True):
+            # 并行处理：取各段处理时间的最大值
+            total_processing_time = max(segment_processing_times) if segment_processing_times else 0
+            self.logger.info(f"并行处理模式：总处理时间取最大值 {total_processing_time:.2f}s (各段时间: {[f'{t:.2f}s' for t in segment_processing_times]})")
+        else:
+            # 串行处理：取各段处理时间的总和
+            total_processing_time = sum(segment_processing_times) if segment_processing_times else 0
+            self.logger.info(f"串行处理模式：总处理时间取总和 {total_processing_time:.2f}s (各段时间: {[f'{t:.2f}s' for t in segment_processing_times]})")
+        
+        # 确保合并后的文本完整性
+        merged_text = ensure_text_completeness(merged_text.strip())
+        
+        # 重新计算字数统计，确保准确性
+        final_word_count = count_chinese_words(merged_text)
+        final_character_count = count_characters(merged_text)
+        
+        # 如果重新计算的统计与累加值差异较大，使用重新计算的值
+        if abs(final_word_count - total_word_count) > 10 or abs(final_character_count - total_character_count) > 50:
+            self.logger.info(f"字数统计差异较大，使用重新计算的值: 字数 {total_word_count} -> {final_word_count}, 字符数 {total_character_count} -> {final_character_count}")
+            total_word_count = final_word_count
+            total_character_count = final_character_count
         
         # 清理临时文件
         for result in segment_results:
@@ -1256,7 +1629,7 @@ class WorkflowSpeechProcessor:
             'source_file': str(original_audio_path),
             'file_name': original_audio_path.name,
             'file_size': original_audio_path.stat().st_size,
-            'transcription': merged_text.strip(),
+            'transcription': merged_text,
             'processing_time': total_processing_time,
             'timestamp': datetime.now().isoformat(),
             'status': 'success' if successful_segments > 0 else 'error',
@@ -1305,6 +1678,7 @@ class WorkflowSpeechProcessor:
                 'min_segment_duration': self.config.get('min_segment_duration', 30.0),
                 'max_segment_duration': self.config.get('max_segment_duration', 300.0),
                 'overlap_duration': self.config.get('overlap_duration', 5.0),
+                'include_segment_markers': self.config.get('include_segment_markers', False),
                 'audio_libs_available': AUDIO_LIBS_AVAILABLE
             },
             'dashscope_correction': {
@@ -1313,7 +1687,7 @@ class WorkflowSpeechProcessor:
                 'api_key_configured': bool(self.config.get('dashscope_api_key')),
                 'model': self.config.get('dashscope_model', 'qwen-turbo'),
                 'temperature': self.config.get('dashscope_temperature', 0.1),
-                'max_tokens': self.config.get('dashscope_max_tokens', 4000),
+                'max_tokens': self.config.get('dashscope_max_tokens', 10000),
                 'timeout': self.config.get('dashscope_timeout', 30)
             },
             'timestamp': datetime.now().isoformat()
@@ -1374,6 +1748,7 @@ def process_audio_for_workflow(audio_input: Union[str, Path],
                 f.write(f"字符数: {result.get('metadata', {}).get('character_count', 0)}\n")
                 f.write(f"处理时间: {result.get('processing_time', 0):.2f}秒\n")
                 f.write(f"音频时长: {result.get('metadata', {}).get('audio_duration', 0):.2f}秒\n")
+                f.write(f"分段信息: {result.get('metadata', {}).get('segmentation_info', {})}\n")
         
         return result
     
@@ -1399,7 +1774,7 @@ if __name__ == '__main__':
     parser.add_argument('--device', default=default_device, help='设备 (cuda:0, cpu)')
     parser.add_argument('--language', default='auto', help='语言')
     parser.add_argument('--parallel', action='store_true', default=True, help='启用并行处理 (默认启用)')
-    parser.add_argument('--no-parallel', dest='parallel', action='store_false', help='禁用并行处理')
+    parser.add_argument('--no-parallel', dest='parallel', action='store_false', help='禁用并行处理和智能分割功能')
     parser.add_argument('--max-workers', type=int, default=None, help='最大工作进程数 (默认使用CPU核心数)')
     parser.add_argument('--sequential', action='store_true', help='强制使用串行处理模式')
     parser.add_argument('--show-config', action='store_true', help='显示智能分割配置信息')
@@ -1408,7 +1783,7 @@ if __name__ == '__main__':
     parser.add_argument('--dashscope-api-key', help='通义千问API密钥')
     parser.add_argument('--dashscope-model', default='qwen-turbo', help='通义千问模型名称')
     parser.add_argument('--dashscope-temperature', type=float, default=0.1, help='通义千问温度参数')
-    parser.add_argument('--dashscope-max-tokens', type=int, default=4000, help='通义千问最大token数')
+    parser.add_argument('--dashscope-max-tokens', type=int, default=10000, help='通义千问最大token数')
     parser.add_argument('--dashscope-timeout', type=int, default=30, help='通义千问API超时时间（秒）')
     
     args = parser.parse_args()
@@ -1418,7 +1793,7 @@ if __name__ == '__main__':
         'language': args.language,
         'parallel_processing': args.parallel and not args.sequential,
         'max_workers': args.max_workers,
-        'enable_smart_segmentation': not args.disable_smart_seg,
+        'enable_smart_segmentation': not args.disable_smart_seg and args.parallel and not args.sequential,
         'enable_dashscope_correction': args.enable_correction,
         'dashscope_api_key': args.dashscope_api_key,
         'dashscope_model': args.dashscope_model,
@@ -1463,7 +1838,13 @@ if __name__ == '__main__':
     print(f"  语言: {args.language}")
     print(f"  并行处理: {config['parallel_processing']}")
     print(f"  智能分割: {config['enable_smart_segmentation']}")
-    print(f"  智能分割激活条件: 最佳分割段数 > 2")
+    if config['enable_smart_segmentation']:
+        print(f"  智能分割激活条件: 最佳分割段数 > 2")
+    else:
+        if not config['parallel_processing']:
+            print(f"  智能分割已禁用: 并行处理被禁用")
+        else:
+            print(f"  智能分割已禁用: 用户手动禁用")
     print(f"  通义千问内容纠错: {config['enable_dashscope_correction']}")
     if config['enable_dashscope_correction']:
         print(f"  通义千问模型: {config['dashscope_model']}")

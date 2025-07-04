@@ -111,7 +111,7 @@ ppt_data = interface.prepare_for_ppt_generator(result['result'])
     {
       "file_name": "audio1.mp3",
       "file_path": "/path/to/audio1.mp3",
-      "file_size_bytes": 1024000,
+      "file_size_bytes": 10210000,
       "timestamp": "2024-01-15T10:30:42.123456",
       "model_used": "iic/SenseVoiceSmall",
       "device_used": "cuda:0",

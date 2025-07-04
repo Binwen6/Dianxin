@@ -10,6 +10,9 @@ soundfile
 # 通义千问API依赖
 dashscope
 
+# 环境变量支持
+python-dotenv
+
 # 其他工具依赖
 numpy
 scipy 
