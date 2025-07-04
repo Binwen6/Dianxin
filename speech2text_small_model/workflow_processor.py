@@ -15,9 +15,99 @@ import time
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import functools
+import math
+import tempfile
+import shutil
 
 from funasr import AutoModel
 from funasr.utils.postprocess_utils import rich_transcription_postprocess
+
+# 尝试导入音频处理库
+try:
+    import librosa
+    import soundfile as sf
+    AUDIO_LIBS_AVAILABLE = True
+except ImportError:
+    AUDIO_LIBS_AVAILABLE = False
+    print("警告: librosa 或 soundfile 库未安装，智能分割功能将受限。请安装: pip install librosa soundfile")
+
+# 尝试导入通义千问API库
+try:
+    import dashscope
+    from dashscope import Generation
+    DASHSCOPE_AVAILABLE = True
+except ImportError:
+    DASHSCOPE_AVAILABLE = False
+    print("警告: dashscope 库未安装，内容纠错功能将不可用。请安装: pip install dashscope")
+
+
+def _correct_text_with_dashscope(text: str, config: Dict[str, Any]) -> str:
+    """
+    使用通义千问API对文本进行纠错
+    
+    Args:
+        text: 需要纠错的文本
+        config: 配置字典，包含通义千问API配置
+        
+    Returns:
+        纠错后的文本
+    """
+    if not DASHSCOPE_AVAILABLE:
+        return text
+    
+    if not text or not text.strip():
+        return text
+    
+    # 检查通义千问配置
+    api_key = config.get('dashscope_api_key') or os.environ.get('DASHSCOPE_API_KEY')
+    if not api_key:
+        print("警告: 未配置通义千问API密钥，跳过内容纠错")
+        return text
+    
+    try:
+        # 设置通义千问API密钥
+        dashscope.api_key = api_key
+        
+        # 构建纠错提示
+        system_prompt = """你是一个专业的文本纠错助手。请对输入的语音转文字结果进行纠错，主要任务包括：
+
+1. 修正语法错误和用词错误
+2. 修正标点符号使用
+3. 保持原文的意思和语调
+4. 修正同音字错误
+5. 补充缺失的标点符号
+6. 保持文本的自然流畅性
+
+请直接返回纠错后的文本，不要添加任何解释或标记。"""
+
+        # 调用通义千问API
+        response = Generation.call(
+            model=config.get('dashscope_model', 'qwen-turbo'),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"请对以下语音转文字结果进行纠错：\n\n{text}"}
+            ],
+            temperature=config.get('dashscope_temperature', 0.1),
+            max_tokens=config.get('dashscope_max_tokens', 4000),
+            timeout=config.get('dashscope_timeout', 30)
+        )
+        
+        if response.status_code == 200:
+            corrected_text = response.output.choices[0].message.content.strip()
+            
+            # 如果返回的文本为空或异常，返回原文本
+            if not corrected_text:
+                return text
+            
+            return corrected_text
+        else:
+            print(f"通义千问API调用失败: {response.message}")
+            return text
+        
+    except Exception as e:
+        # 如果API调用失败，返回原文本
+        print(f"通义千问API纠错失败: {e}")
+        return text
 
 
 def _process_single_audio_worker(audio_path: str, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -76,6 +166,28 @@ def _process_single_audio_worker(audio_path: str, config: Dict[str, Any]) -> Dic
         # 后处理文本
         text = rich_transcription_postprocess(res[0]["text"])
         
+        # 使用通义千问API进行内容纠错
+        if config.get('enable_dashscope_correction', False):
+            correction_start_time = time.time()
+            original_text = text
+            text = _correct_text_with_dashscope(text, config)
+            correction_time = time.time() - correction_start_time
+            correction_info = {
+                'enabled': True,
+                'correction_time': correction_time,
+                'original_text': original_text,
+                'corrected_text': text,
+                'text_changed': original_text != text
+            }
+        else:
+            correction_info = {
+                'enabled': False,
+                'correction_time': 0,
+                'original_text': text,
+                'corrected_text': text,
+                'text_changed': False
+            }
+        
         processing_time = time.time() - start_time
         
         # 估算音频时长
@@ -92,7 +204,7 @@ def _process_single_audio_worker(audio_path: str, config: Dict[str, Any]) -> Dic
             'source_file': str(audio_path),
             'file_name': audio_path.name,
             'file_size': audio_path.stat().st_size,
-            'transcription': text,
+            'transcription': text,  # 这里已经是纠错后的文本
             'processing_time': processing_time,
             'timestamp': datetime.now().isoformat(),
             'status': 'success',
@@ -102,7 +214,8 @@ def _process_single_audio_worker(audio_path: str, config: Dict[str, Any]) -> Dic
                 'device': config.get('device', 'cuda:0'),
                 'audio_duration': estimate_duration(audio_path),
                 'word_count': len(text.split()) if text else 0,
-                'character_count': len(text) if text else 0
+                'character_count': len(text) if text else 0,
+                'dashscope_correction': correction_info
             }
         }
         
@@ -166,6 +279,20 @@ class WorkflowSpeechProcessor:
             'parallel_processing': True,  # 是否启用并行处理
             'max_workers': None,  # 最大工作进程数，None表示使用CPU核心数
             'chunk_size': 1,  # 每个进程处理的文件数量
+            # 智能分割配置
+            'enable_smart_segmentation': True,  # 是否启用智能分割
+            'max_audio_duration_for_single_process': 600.0,  # 超过此时长（秒）的音频将进行智能分割
+            'processing_time_ratio': 1/17,  # 音频处理时间与原始时间的比值（研究结果）
+            'min_segment_duration': 30.0,  # 最小分割段时长（秒）
+            'max_segment_duration': 300.0,  # 最大分割段时长（秒）
+            'overlap_duration': 5.0,  # 分割段之间的重叠时长（秒）
+            # 通义千问内容纠错配置
+            'enable_dashscope_correction': False,  # 是否启用通义千问内容纠错
+            'dashscope_api_key': None,  # 通义千问API密钥
+            'dashscope_model': 'qwen-turbo',  # 使用的模型
+            'dashscope_temperature': 0.1,  # 温度参数
+            'dashscope_max_tokens': 4000,  # 最大token数
+            'dashscope_timeout': 30,  # API超时时间（秒）
         }
     
     def _setup_logger(self) -> logging.Logger:
@@ -210,7 +337,7 @@ class WorkflowSpeechProcessor:
     
     def process_single_audio(self, audio_path: Union[str, Path]) -> Dict[str, Any]:
         """
-        处理单个音频文件
+        处理单个音频文件（支持智能分割）
         
         Args:
             audio_path: 音频文件路径
@@ -223,11 +350,27 @@ class WorkflowSpeechProcessor:
         if not audio_path.exists():
             raise FileNotFoundError(f"音频文件不存在: {audio_path}")
         
+        # 检查是否需要智能分割
+        if self._should_segment_audio(audio_path):
+            return self._process_audio_with_segmentation(audio_path)
+        else:
+            return self._process_audio_directly(audio_path)
+    
+    def _process_audio_directly(self, audio_path: Path) -> Dict[str, Any]:
+        """
+        直接处理音频文件（不分割）
+        
+        Args:
+            audio_path: 音频文件路径
+            
+        Returns:
+            处理结果字典
+        """
         # 加载模型
         self.load_model()
         
         try:
-            self.logger.info(f"正在处理音频文件: {audio_path.name}")
+            self.logger.info(f"正在直接处理音频文件: {audio_path.name}")
             start_time = time.time()
             
             # 执行转写
@@ -244,6 +387,29 @@ class WorkflowSpeechProcessor:
             # 后处理文本
             text = rich_transcription_postprocess(res[0]["text"])
             
+            # 使用通义千问API进行内容纠错
+            if self.config.get('enable_dashscope_correction', False):
+                correction_start_time = time.time()
+                original_text = text
+                text = _correct_text_with_dashscope(text, self.config)
+                correction_time = time.time() - correction_start_time
+                correction_info = {
+                    'enabled': True,
+                    'correction_time': correction_time,
+                    'original_text': original_text,
+                    'corrected_text': text,
+                    'text_changed': original_text != text
+                }
+                self.logger.info(f"通义千问纠错完成: {audio_path.name} (纠错耗时: {correction_time:.2f}s, 文本是否变化: {original_text != text})")
+            else:
+                correction_info = {
+                    'enabled': False,
+                    'correction_time': 0,
+                    'original_text': text,
+                    'corrected_text': text,
+                    'text_changed': False
+                }
+            
             processing_time = time.time() - start_time
             
             # 构建结果
@@ -251,7 +417,7 @@ class WorkflowSpeechProcessor:
                 'source_file': str(audio_path),
                 'file_name': audio_path.name,
                 'file_size': audio_path.stat().st_size,
-                'transcription': text,
+                'transcription': text,  # 这里已经是纠错后的文本
                 'processing_time': processing_time,
                 'timestamp': datetime.now().isoformat(),
                 'status': 'success',
@@ -261,7 +427,14 @@ class WorkflowSpeechProcessor:
                     'device': self.config.get('device', 'cuda:0'),
                     'audio_duration': self._estimate_duration(audio_path),
                     'word_count': len(text.split()) if text else 0,
-                    'character_count': len(text) if text else 0
+                    'character_count': len(text) if text else 0,
+                    'dashscope_correction': correction_info,
+                    'segmentation_info': {
+                        'total_segments': 1,
+                        'successful_segments': 1,
+                        'failed_segments': 0,
+                        'segmentation_method': 'direct_processing'
+                    }
                 }
             }
             
@@ -280,6 +453,77 @@ class WorkflowSpeechProcessor:
                 'error': str(e),
                 'metadata': {}
             }
+    
+    def _process_audio_with_segmentation(self, audio_path: Path) -> Dict[str, Any]:
+        """
+        使用智能分割处理长音频文件
+        
+        Args:
+            audio_path: 音频文件路径
+            
+        Returns:
+            处理结果字典
+        """
+        try:
+            self.logger.info(f"开始智能分割处理长音频: {audio_path.name}")
+            
+            # 获取音频时长
+            audio_duration = self._estimate_duration(audio_path)
+            
+            # 计算最佳分割段数
+            processing_time_ratio = self.config.get('processing_time_ratio', 1/17)
+            num_segments = self._calculate_optimal_segments(audio_duration, processing_time_ratio)
+            
+            # 分割音频
+            segment_paths = self._segment_audio(audio_path, num_segments)
+            
+            if len(segment_paths) <= 1:
+                self.logger.warning("音频分割失败或只有一段，回退到直接处理")
+                return self._process_audio_directly(audio_path)
+            
+            # 使用现有的多音频并行处理机制处理分割段
+            self.logger.info(f"开始并行处理 {len(segment_paths)} 个分割段")
+            
+            # 检查是否启用并行处理
+            if (self.config.get('parallel_processing', True) and 
+                len(segment_paths) > 1 and 
+                len(segment_paths) >= 2):  # 分割段数量>=2时使用并行
+                
+                # 使用现有的并行处理逻辑
+                segment_results = self._process_audio_directory_parallel(segment_paths, Path(tempfile.gettempdir()))
+                
+                # 提取处理结果
+                if segment_results.get('status') == 'completed':
+                    segment_results = segment_results.get('processed_files', [])
+                else:
+                    # 如果并行处理失败，回退到串行
+                    self.logger.warning("并行处理分割段失败，回退到串行处理")
+                    segment_results = []
+                    for i, segment_path in enumerate(segment_paths):
+                        self.logger.info(f"处理分割段 {i+1}/{len(segment_paths)}: {segment_path.name}")
+                        segment_result = self._process_audio_directly(segment_path)
+                        segment_results.append(segment_result)
+            else:
+                # 串行处理分割段
+                if len(segment_paths) > 1:
+                    self.logger.info(f"分割段数量较少({len(segment_paths)})，使用串行处理以避免模型加载开销")
+                segment_results = []
+                for i, segment_path in enumerate(segment_paths):
+                    self.logger.info(f"处理分割段 {i+1}/{len(segment_paths)}: {segment_path.name}")
+                    segment_result = self._process_audio_directly(segment_path)
+                    segment_results.append(segment_result)
+            
+            # 合并结果
+            merged_result = self._merge_segment_results(segment_results, audio_path)
+            
+            self.logger.info(f"智能分割处理完成: {audio_path.name}")
+            return merged_result
+            
+        except Exception as e:
+            self.logger.error(f"智能分割处理失败 {audio_path}: {e}")
+            # 回退到直接处理
+            self.logger.info("回退到直接处理模式")
+            return self._process_audio_directly(audio_path)
     
     def process_audio_directory(self, audio_dir: Union[str, Path], 
                               output_dir: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
@@ -547,6 +791,18 @@ class WorkflowSpeechProcessor:
                     f.write(f"字符数: {result['metadata']['character_count']}\n")
                     f.write(f"处理时间: {result['processing_time']:.2f}秒\n")
                     f.write(f"音频时长: {result['metadata']['audio_duration']:.2f}秒\n")
+                    
+                    # 添加通义千问纠错信息
+                    correction_info = result['metadata'].get('dashscope_correction', {})
+                    if correction_info.get('enabled', False):
+                        f.write(f"通义千问纠错: 启用\n")
+                        f.write(f"纠错耗时: {correction_info.get('correction_time', 0):.2f}秒\n")
+                        f.write(f"文本是否变化: {'是' if correction_info.get('text_changed', False) else '否'}\n")
+                        if correction_info.get('text_changed', False):
+                            f.write(f"原始文本:\n{correction_info.get('original_text', '')}\n\n")
+                            f.write(f"纠错后文本:\n{correction_info.get('corrected_text', '')}\n\n")
+                    else:
+                        f.write(f"通义千问纠错: 未启用\n")
         
         # 保存整体批量处理结果（JSON格式）
         batch_json_file = output_dir / f'batch_results_{timestamp}.json'
@@ -783,16 +1039,248 @@ class WorkflowSpeechProcessor:
         return segments
     
     def _estimate_duration(self, audio_path: Path) -> float:
-        """估算音频文件时长（简单估算）"""
+        """估算音频文件时长（优先使用librosa，回退到文件大小估算）"""
         try:
-            # 这里可以集成更准确的音频时长检测库
-            # 目前使用文件大小进行简单估算
-            file_size = audio_path.stat().st_size
-            # 假设平均比特率约为128kbps
-            estimated_duration = file_size / (128 * 1024 / 8)
-            return max(0, estimated_duration)
-        except:
-            return 0.0
+            if AUDIO_LIBS_AVAILABLE:
+                # 使用librosa获取准确的音频时长
+                audio, sr = librosa.load(str(audio_path), sr=None)
+                duration = len(audio) / sr
+                return duration
+            else:
+                # 回退到文件大小估算
+                file_size = audio_path.stat().st_size
+                # 假设平均比特率约为128kbps
+                estimated_duration = file_size / (128 * 1024 / 8)
+                return max(0, estimated_duration)
+        except Exception as e:
+            self.logger.warning(f"音频时长检测失败，使用文件大小估算: {e}")
+            try:
+                file_size = audio_path.stat().st_size
+                estimated_duration = file_size / (128 * 1024 / 8)
+                return max(0, estimated_duration)
+            except:
+                return 0.0
+    
+    def _calculate_optimal_segments(self, audio_duration: float, processing_time_ratio: float = 1/17) -> int:
+        """
+        根据研究结果计算最佳分割段数
+        
+        Args:
+            audio_duration: 音频时长（秒）
+            processing_time_ratio: 处理时间与音频时长的比值（默认1:17）
+            
+        Returns:
+            最佳分割段数
+        """
+        # 根据研究：根号下（C比7）的最近整数为最佳等切分段数
+        # C = 不包括模型加载时间的单线程纯处理花费的时间
+        # C ≈ 音频时长 * 处理时间比值
+        C = audio_duration * processing_time_ratio
+        
+        # 计算根号下（C比7）
+        optimal_segments = math.sqrt(C / 7)
+        
+        # 取最近整数
+        optimal_segments = round(optimal_segments)
+        
+        # 确保至少为1，最多不超过音频时长除以最小段时长
+        min_segments = 1
+        max_segments = max(1, int(audio_duration / self.config.get('min_segment_duration', 30.0)))
+        
+        optimal_segments = max(min_segments, min(optimal_segments, max_segments))
+        
+        self.logger.info(f"音频时长: {audio_duration:.2f}s, 计算得到最佳分割段数: {optimal_segments}")
+        return optimal_segments
+    
+    def _should_segment_audio(self, audio_path: Path) -> bool:
+        """
+        判断是否需要对音频进行智能分割
+        
+        Args:
+            audio_path: 音频文件路径
+            
+        Returns:
+            是否需要分割
+        """
+        if not self.config.get('enable_smart_segmentation', True):
+            return False
+        
+        # 获取音频时长
+        audio_duration = self._estimate_duration(audio_path)
+        
+        # 使用研究公式计算最佳分割段数
+        processing_time_ratio = self.config.get('processing_time_ratio', 1/17)
+        optimal_segments = self._calculate_optimal_segments(audio_duration, processing_time_ratio)
+        
+        # 只有当最佳分割段数 > 2 时才真正启用智能分割
+        should_segment = optimal_segments > 2
+        
+        self.logger.info(f"音频 {audio_path.name} 时长: {audio_duration:.2f}s, 计算得到最佳段数: {optimal_segments}, 是否启用智能分割: {should_segment}")
+        
+        return should_segment
+    
+    def _segment_audio(self, audio_path: Path, num_segments: int) -> List[Path]:
+        """
+        将音频文件分割为指定数量的段
+        
+        Args:
+            audio_path: 音频文件路径
+            num_segments: 分割段数
+            
+        Returns:
+            分割后的音频文件路径列表
+        """
+        if not AUDIO_LIBS_AVAILABLE:
+            self.logger.error("librosa 或 soundfile 库未安装，无法进行音频分割")
+            return [audio_path]
+        
+        try:
+            # 加载音频
+            audio, sr = librosa.load(str(audio_path), sr=None)
+            duration = len(audio) / sr
+            
+            # 计算每段时长（包含重叠）
+            overlap_duration = self.config.get('overlap_duration', 5.0)
+            overlap_samples = int(overlap_duration * sr)
+            
+            # 计算每段的基础时长
+            base_segment_duration = duration / num_segments
+            base_segment_samples = int(base_segment_duration * sr)
+            
+            # 确保每段时长在合理范围内
+            min_segment_samples = int(self.config.get('min_segment_duration', 30.0) * sr)
+            max_segment_samples = int(self.config.get('max_segment_duration', 300.0) * sr)
+            
+            base_segment_samples = max(min_segment_samples, 
+                                     min(base_segment_samples, max_segment_samples))
+            
+            # 创建临时目录
+            temp_dir = Path(tempfile.mkdtemp(prefix=f"audio_segments_{audio_path.stem}_"))
+            segment_paths = []
+            
+            self.logger.info(f"开始分割音频 {audio_path.name} 为 {num_segments} 段")
+            
+            for i in range(num_segments):
+                # 计算当前段的起始和结束位置
+                start_sample = i * (base_segment_samples - overlap_samples)
+                end_sample = min(start_sample + base_segment_samples, len(audio))
+                
+                # 确保最后一段不会太短
+                if i == num_segments - 1 and end_sample - start_sample < min_segment_samples:
+                    start_sample = max(0, end_sample - min_segment_samples)
+                
+                # 提取音频段
+                segment_audio = audio[start_sample:end_sample]
+                
+                # 保存音频段
+                segment_filename = f"{audio_path.stem}_segment_{i+1:03d}.wav"
+                segment_path = temp_dir / segment_filename
+                
+                sf.write(str(segment_path), segment_audio, sr)
+                segment_paths.append(segment_path)
+                
+                segment_duration = len(segment_audio) / sr
+                self.logger.info(f"  段 {i+1}: {segment_duration:.2f}s ({start_sample/sr:.2f}s - {end_sample/sr:.2f}s)")
+            
+            self.logger.info(f"音频分割完成，共生成 {len(segment_paths)} 个文件")
+            return segment_paths
+            
+        except Exception as e:
+            self.logger.error(f"音频分割失败: {e}")
+            return [audio_path]
+    
+    def _merge_segment_results(self, segment_results: List[Dict[str, Any]], 
+                              original_audio_path: Path) -> Dict[str, Any]:
+        """
+        合并分割段的处理结果
+        
+        Args:
+            segment_results: 各分割段的处理结果列表
+            original_audio_path: 原始音频文件路径
+            
+        Returns:
+            合并后的结果
+        """
+        if not segment_results:
+            return {
+                'source_file': str(original_audio_path),
+                'file_name': original_audio_path.name,
+                'transcription': '',
+                'processing_time': 0,
+                'timestamp': datetime.now().isoformat(),
+                'status': 'error',
+                'error': '没有有效的分割段结果',
+                'metadata': {}
+            }
+        
+        # 合并文本
+        merged_text = ""
+        total_processing_time = 0
+        total_word_count = 0
+        total_character_count = 0
+        successful_segments = 0
+        
+        for i, result in enumerate(segment_results):
+            if result.get('status') == 'success':
+                segment_text = result.get('transcription', '').strip()
+                if segment_text:
+                    # 添加段标识（可选）
+                    if self.config.get('include_segment_markers', False):
+                        merged_text += f"[段{i+1}] {segment_text}\n"
+                    else:
+                        merged_text += f"{segment_text}\n"
+                    
+                    total_processing_time += result.get('processing_time', 0)
+                    total_word_count += result.get('metadata', {}).get('word_count', 0)
+                    total_character_count += result.get('metadata', {}).get('character_count', 0)
+                    successful_segments += 1
+            else:
+                self.logger.warning(f"分割段 {i+1} 处理失败: {result.get('error', 'Unknown error')}")
+        
+        # 清理临时文件
+        for result in segment_results:
+            if result.get('status') == 'success':
+                segment_path = Path(result.get('source_file', ''))
+                if segment_path.exists() and 'segment_' in segment_path.name:
+                    try:
+                        segment_path.unlink()
+                        # 尝试删除临时目录
+                        temp_dir = segment_path.parent
+                        if temp_dir.exists() and temp_dir.name.startswith('audio_segments_'):
+                            shutil.rmtree(temp_dir)
+                    except Exception as e:
+                        self.logger.warning(f"清理临时文件失败: {e}")
+        
+        # 构建合并结果
+        merged_result = {
+            'source_file': str(original_audio_path),
+            'file_name': original_audio_path.name,
+            'file_size': original_audio_path.stat().st_size,
+            'transcription': merged_text.strip(),
+            'processing_time': total_processing_time,
+            'timestamp': datetime.now().isoformat(),
+            'status': 'success' if successful_segments > 0 else 'error',
+            'metadata': {
+                'model_used': self.config['model_dir'],
+                'language': self.config.get('language', 'auto'),
+                'device': self.config.get('device', 'cuda:0'),
+                'audio_duration': self._estimate_duration(original_audio_path),
+                'word_count': total_word_count,
+                'character_count': total_character_count,
+                'segmentation_info': {
+                    'total_segments': len(segment_results),
+                    'successful_segments': successful_segments,
+                    'failed_segments': len(segment_results) - successful_segments,
+                    'segmentation_method': 'smart_segmentation'
+                }
+            }
+        }
+        
+        if successful_segments == 0:
+            merged_result['error'] = '所有分割段处理失败'
+        
+        self.logger.info(f"分割段结果合并完成: {successful_segments}/{len(segment_results)} 段成功")
+        return merged_result
     
     def get_workflow_status(self) -> Dict[str, Any]:
         """获取工作流状态信息"""
@@ -809,6 +1297,24 @@ class WorkflowSpeechProcessor:
                 'enabled': self.config.get('parallel_processing', True),
                 'max_workers': self.config.get('max_workers'),
                 'cpu_count': mp.cpu_count()
+            },
+            'smart_segmentation': {
+                'enabled': self.config.get('enable_smart_segmentation', True),
+                'max_duration_for_single_process': self.config.get('max_audio_duration_for_single_process', 600.0),
+                'processing_time_ratio': self.config.get('processing_time_ratio', 1/17),
+                'min_segment_duration': self.config.get('min_segment_duration', 30.0),
+                'max_segment_duration': self.config.get('max_segment_duration', 300.0),
+                'overlap_duration': self.config.get('overlap_duration', 5.0),
+                'audio_libs_available': AUDIO_LIBS_AVAILABLE
+            },
+            'dashscope_correction': {
+                'enabled': self.config.get('enable_dashscope_correction', False),
+                'api_available': DASHSCOPE_AVAILABLE,
+                'api_key_configured': bool(self.config.get('dashscope_api_key')),
+                'model': self.config.get('dashscope_model', 'qwen-turbo'),
+                'temperature': self.config.get('dashscope_temperature', 0.1),
+                'max_tokens': self.config.get('dashscope_max_tokens', 4000),
+                'timeout': self.config.get('dashscope_timeout', 30)
             },
             'timestamp': datetime.now().isoformat()
         }
@@ -896,6 +1402,14 @@ if __name__ == '__main__':
     parser.add_argument('--no-parallel', dest='parallel', action='store_false', help='禁用并行处理')
     parser.add_argument('--max-workers', type=int, default=None, help='最大工作进程数 (默认使用CPU核心数)')
     parser.add_argument('--sequential', action='store_true', help='强制使用串行处理模式')
+    parser.add_argument('--show-config', action='store_true', help='显示智能分割配置信息')
+    parser.add_argument('--disable-smart-seg', action='store_true', help='禁用智能分割功能')
+    parser.add_argument('--enable-correction', action='store_true', help='启用通义千问内容纠错')
+    parser.add_argument('--dashscope-api-key', help='通义千问API密钥')
+    parser.add_argument('--dashscope-model', default='qwen-turbo', help='通义千问模型名称')
+    parser.add_argument('--dashscope-temperature', type=float, default=0.1, help='通义千问温度参数')
+    parser.add_argument('--dashscope-max-tokens', type=int, default=4000, help='通义千问最大token数')
+    parser.add_argument('--dashscope-timeout', type=int, default=30, help='通义千问API超时时间（秒）')
     
     args = parser.parse_args()
     
@@ -903,8 +1417,44 @@ if __name__ == '__main__':
         'device': args.device,
         'language': args.language,
         'parallel_processing': args.parallel and not args.sequential,
-        'max_workers': args.max_workers
+        'max_workers': args.max_workers,
+        'enable_smart_segmentation': not args.disable_smart_seg,
+        'enable_dashscope_correction': args.enable_correction,
+        'dashscope_api_key': args.dashscope_api_key,
+        'dashscope_model': args.dashscope_model,
+        'dashscope_temperature': args.dashscope_temperature,
+        'dashscope_max_tokens': args.dashscope_max_tokens,
+        'dashscope_timeout': args.dashscope_timeout
     }
+    
+    # 如果只是显示配置，不执行处理
+    if args.show_config:
+        processor = WorkflowSpeechProcessor(config)
+        status = processor.get_workflow_status()
+        
+        print("=== 智能分割配置信息 ===")
+        print(f"智能分割: {'启用' if status['smart_segmentation']['enabled'] else '禁用'}")
+        print(f"激活条件: 最佳分割段数 > 2")
+        print(f"处理时间比值: 1:{int(1/status['smart_segmentation']['processing_time_ratio'])}")
+        print(f"最小段时长: {status['smart_segmentation']['min_segment_duration']}秒")
+        print(f"最大段时长: {status['smart_segmentation']['max_segment_duration']}秒")
+        print(f"重叠时长: {status['smart_segmentation']['overlap_duration']}秒")
+        print(f"音频库可用: {'是' if status['smart_segmentation']['audio_libs_available'] else '否'}")
+        print()
+        print("=== 并行处理配置 ===")
+        print(f"并行处理: {'启用' if status['parallel_processing']['enabled'] else '禁用'}")
+        print(f"最大工作进程数: {status['parallel_processing']['max_workers'] or '自动 (CPU核心数)'}")
+        print(f"CPU核心数: {status['parallel_processing']['cpu_count']}")
+        print()
+        print("=== 通义千问内容纠错配置 ===")
+        print(f"内容纠错: {'启用' if status['dashscope_correction']['enabled'] else '禁用'}")
+        print(f"通义千问库可用: {'是' if status['dashscope_correction']['api_available'] else '否'}")
+        print(f"API密钥配置: {'是' if status['dashscope_correction']['api_key_configured'] else '否'}")
+        print(f"使用模型: {status['dashscope_correction']['model']}")
+        print(f"温度参数: {status['dashscope_correction']['temperature']}")
+        print(f"最大token数: {status['dashscope_correction']['max_tokens']}")
+        print(f"超时时间: {status['dashscope_correction']['timeout']}秒")
+        sys.exit(0)
     
     print(f"配置信息:")
     print(f"  输入: {args.input}")
@@ -912,6 +1462,14 @@ if __name__ == '__main__':
     print(f"  设备: {args.device}")
     print(f"  语言: {args.language}")
     print(f"  并行处理: {config['parallel_processing']}")
+    print(f"  智能分割: {config['enable_smart_segmentation']}")
+    print(f"  智能分割激活条件: 最佳分割段数 > 2")
+    print(f"  通义千问内容纠错: {config['enable_dashscope_correction']}")
+    if config['enable_dashscope_correction']:
+        print(f"  通义千问模型: {config['dashscope_model']}")
+        print(f"  通义千问温度: {config['dashscope_temperature']}")
+        print(f"  通义千问最大token: {config['dashscope_max_tokens']}")
+        print(f"  通义千问超时: {config['dashscope_timeout']}秒")
     if config['max_workers']:
         print(f"  最大工作进程数: {config['max_workers']}")
     else:

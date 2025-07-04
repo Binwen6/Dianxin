@@ -1,2 +1,3 @@
 /.DS_Store
 /datasets/*
+/speech2text_small_model/.env
