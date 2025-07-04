@@ -244,7 +244,7 @@ python workflow_processor.py audio_directory -o output --no-parallel
 python workflow_processor.py audio_directory -o output --max-workers 4
 
 # 启用通义千问内容纠错
-python workflow_processor.py input_audio.mp3 --enable-correction --dashscope-api-key YOUR_API_KEY
+python workflow_processor.py input_audio.mp3 --enable-correction
 
 ```
 

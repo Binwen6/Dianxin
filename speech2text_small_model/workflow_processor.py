@@ -175,7 +175,7 @@ def ensure_text_completeness(text: str, max_length: int = 10000) -> str:
     return text
 
 
-def get_safe_max_workers(config: Dict[str, Any], default: int = 3) -> int:
+def get_safe_max_workers(config: Dict[str, Any], default: int = 4) -> int:
     """
     安全地获取最大并发数，确保不为None
     
@@ -498,7 +498,7 @@ class WorkflowSpeechProcessor:
             'max_segment_length': 30.0,  # 最大片段长度（秒）
             # 并行处理配置
             'parallel_processing': True,  # 是否启用并行处理
-            'max_workers': 3,  # 最大工作进程数，统一限制为3个
+            'max_workers': 4,  # 最大工作进程数，统一限制为3个
             'chunk_size': 1,  # 每个进程处理的文件数量
             # 智能分割配置
             'enable_smart_segmentation': True,  # 是否启用智能分割
@@ -701,7 +701,7 @@ class WorkflowSpeechProcessor:
             num_segments = self._calculate_optimal_segments(audio_duration, processing_time_ratio)
             
             # 获取最大并发数，确保不为None
-            max_workers = get_safe_max_workers(self.config, 3)
+            max_workers = get_safe_max_workers(self.config, 4)
             self.logger.info(f"音频时长: {audio_duration:.2f}s, 最终分段数: {num_segments}, 最大并发数: {max_workers}")
             
             # 分割音频
@@ -760,7 +760,7 @@ class WorkflowSpeechProcessor:
         self.logger.info("使用分段并行处理模式")
         
         # 限制最大进程数为配置的最大并发数，且不超过分段数
-        config_max_workers = get_safe_max_workers(self.config, 3)
+        config_max_workers = get_safe_max_workers(self.config, 4)
         max_workers = min(config_max_workers, len(segment_paths))
         self.logger.info(f"使用 {max_workers} 个工作进程进行分段并行处理 (分段数: {len(segment_paths)}, 最大并发数: {config_max_workers})")
         
@@ -881,10 +881,10 @@ class WorkflowSpeechProcessor:
         max_workers = self.config.get('max_workers')
         if max_workers is None:
             # 统一限制为最多3个进程，无论GPU还是CPU模式
-            max_workers = min(3, len(audio_files))
+            max_workers = min(4, len(audio_files))
         else:
             # 如果用户指定了max_workers，也要确保不超过3个
-            max_workers = min(max_workers, 3, len(audio_files))
+            max_workers = min(max_workers, 4, len(audio_files))
         
         self.logger.info(f"使用 {max_workers} 个工作进程进行并行处理")
         self.logger.info(f"设备: {self.config.get('device', 'cuda:0')}")
@@ -1370,7 +1370,7 @@ class WorkflowSpeechProcessor:
         optimal_segments = round(optimal_segments)
         
         # 获取最大并发数，确保不为None
-        max_workers = get_safe_max_workers(self.config, 3)
+        max_workers = get_safe_max_workers(self.config, 4)
         
         # 确保至少为1，最多不超过音频时长除以最小段时长，且不超过最大并发数
         min_segments = 1
@@ -1411,7 +1411,7 @@ class WorkflowSpeechProcessor:
         optimal_segments = self._calculate_optimal_segments(audio_duration, processing_time_ratio)
         
         # 获取最大并发数，确保不为None
-        max_workers = get_safe_max_workers(self.config, 3)
+        max_workers = get_safe_max_workers(self.config, 4)
         
         # 只有当最佳分割段数 > 2 且不超过最大并发数时才真正启用智能分割
         should_segment = optimal_segments > 2 and optimal_segments <= max_workers
@@ -1464,7 +1464,7 @@ class WorkflowSpeechProcessor:
             temp_dir = Path(tempfile.mkdtemp(prefix=f"audio_segments_{audio_path.stem}_"))
             segment_paths = []
             
-            config_max_workers = get_safe_max_workers(self.config, 3)
+            config_max_workers = get_safe_max_workers(self.config, 4)
             self.logger.info(f"开始分割音频 {audio_path.name} 为 {num_segments} 段 (总时长: {total_duration:.2f}s, 最大并发数: {config_max_workers})")
             
             # 重新计算实际的分割点，确保完整覆盖
