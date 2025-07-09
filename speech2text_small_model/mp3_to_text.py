@@ -219,7 +219,7 @@ def _correct_text_with_dashscope(text: str, config: Dict[str, Any]) -> str:
     
     try:
         # 设置通义千问API密钥
-        dashscope.api_key = api_key
+        dashscope.api_key = 'sk-9df5ae7489d44f18902719b7b1489b69'
         
         # 构建纠错提示
         system_prompt = """你是一个专业的文本纠错助手。请对输入的语音转文字结果进行纠错，主要任务包括：
@@ -1872,3 +1872,6 @@ if __name__ == '__main__':
             if result.get('estimated_parallel_efficiency', 0) > 0:
                 print(f"预估并行效率: {result.get('estimated_parallel_efficiency', 0):.2f}x")
                 print(f"注意：这是基于估算的串行时间，实际效果需要对比测试验证") 
+
+
+# python mp3_to_text.py /Users/eureka/VSCodeProjects/Dianxin/datasets/mp3/test3.mp3 --enable-correction -o /Users/eureka/VSCodeProjects/Dianxin/output/test3
