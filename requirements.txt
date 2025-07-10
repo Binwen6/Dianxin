@@ -1,10 +1,56 @@
-tqdm>=4.64.0
-torch>=2.0.0
-transformers>=4.30.0
-datasets>=2.12.0
-funasr>=0.10.0
-pathlib2>=2.3.7
-typing-extensions>=4.0.0
-moviepy>=1.0.3
+# 核心语音转换库
+funasr>=1.0.0
+funasr-onnx>=0.4.1
+
+# 深度学习框架
+torch>=1.13.0
+transformers>=4.21.0
+
+# 音频处理库
 librosa>=0.10.0
-soundfile>=0.12.0 
+soundfile>=0.10.0
+numpy>=1.21.0
+scipy>=1.7.0
+
+# 可选：通义千问API支持
+dashscope>=1.0.0
+
+# 可选：环境变量管理
+python-dotenv>=0.19.0
+
+# 进度条显示
+tqdm>=4.64.0
+
+# Web API支持 (可选)
+fastapi>=0.100.0
+uvicorn>=0.20.0
+aiohttp>=3.8.0
+python-multipart>=0.0.6
+
+# 文本处理
+jieba>=0.42.0
+
+# 数据科学和机器学习 (可选)
+scikit-learn>=1.0.0
+matplotlib>=3.5.0
+
+# 系统和工具库
+# 若python版本小于3.4，则需要安装pathlib2
+# 若python版本小于3.8，则需要安装typing-extensions
+pathlib2>=2.3.0; python_version < "3.4"
+typing-extensions>=4.0.0; python_version < "3.8"
+
+# 注意事项:
+# 1. ffmpeg 需要单独安装，不能通过pip安装
+#    macOS: brew install ffmpeg
+#    Ubuntu: apt install ffmpeg
+#    Windows: 从 https://ffmpeg.org/download.html 下载
+#
+# 2. 如果需要GPU支持，请安装对应的CUDA版本的PyTorch:
+#    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+#
+# 3. 部分依赖是可选的，根据需要安装:
+#    - dashscope: 通义千问内容纠错功能
+#    - fastapi, uvicorn: Web API服务
+#    - python-dotenv: 环境变量管理
+#    - matplotlib: 可视化功能 

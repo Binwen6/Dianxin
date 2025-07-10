@@ -3,9 +3,11 @@
 """
 SenseVoice 工作流语音转文字处理器
 专门设计用于视频转音频 -> 语音转文字 -> 文字转PPT 工作流的中间环节
+支持视频文件自动提取音频并进行语音转文字
 """
 
 import os
+import sys
 import json
 import logging
 from pathlib import Path
@@ -19,6 +21,7 @@ import math
 import tempfile
 import shutil
 import re
+import subprocess
 
 # 尝试导入python-dotenv库来读取.env文件
 try:
@@ -69,6 +72,111 @@ try:
 except ImportError:
     DASHSCOPE_AVAILABLE = False
     print("警告: dashscope 库未安装，通义千问内容纠错功能将不可用。请安装: pip install dashscope")
+
+
+def extract_audio_from_video(video_path: Union[str, Path], 
+                            output_dir: Optional[Union[str, Path]] = None,
+                            audio_quality: str = "4") -> Path:
+    """
+    从视频文件中提取音频
+    
+    Args:
+        video_path: 视频文件路径
+        output_dir: 音频输出目录，如果为None则使用临时目录
+        audio_quality: 音频质量 (0-9, 0最高质量，9最低质量)
+        
+    Returns:
+        提取的音频文件路径
+        
+    Raises:
+        subprocess.CalledProcessError: ffmpeg执行失败
+        FileNotFoundError: 视频文件不存在或ffmpeg未安装
+    """
+    video_path = Path(video_path)
+    
+    if not video_path.exists():
+        raise FileNotFoundError(f"视频文件不存在: {video_path}")
+    
+    # 检查ffmpeg是否可用
+    try:
+        subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        raise FileNotFoundError("ffmpeg未安装或不在PATH中。请安装ffmpeg: https://ffmpeg.org/download.html")
+    
+    # 确定输出目录
+    if output_dir is None:
+        output_dir = video_path.parent / "extracted_audios"
+    else:
+        output_dir = Path(output_dir)
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 生成音频文件名
+    base_name = video_path.stem
+    audio_path = output_dir / f"{base_name}.mp3"
+    
+    # 如果音频文件已存在，添加时间戳避免冲突
+    if audio_path.exists():
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        audio_path = output_dir / f"{base_name}_{timestamp}.mp3"
+    
+    print(f"正在从视频提取音频: {video_path.name} -> {audio_path.name}")
+    
+    try:
+        # 使用ffmpeg提取音频
+        subprocess.run([
+            "ffmpeg", 
+            "-i", str(video_path),      # 输入视频文件
+            "-vn",                      # 禁用视频
+            "-acodec", "libmp3lame",    # 使用MP3编码器
+            "-q:a", audio_quality,      # 音频质量
+            "-y",                       # 覆盖输出文件
+            str(audio_path)
+        ], check=True, capture_output=True, text=True)
+        
+        print(f"音频提取成功: {audio_path}")
+        return audio_path
+        
+    except subprocess.CalledProcessError as e:
+        error_msg = f"ffmpeg执行失败: {e.stderr if e.stderr else str(e)}"
+        print(f"错误: {error_msg}")
+        raise subprocess.CalledProcessError(e.returncode, e.cmd, error_msg)
+
+
+def is_video_file(file_path: Union[str, Path]) -> bool:
+    """
+    检查文件是否为视频文件
+    
+    Args:
+        file_path: 文件路径
+        
+    Returns:
+        是否为视频文件
+    """
+    video_extensions = {
+        '.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v',
+        '.3gp', '.3g2', '.asf', '.rm', '.rmvb', '.vob', '.ts', '.mts',
+        '.m2ts', '.f4v', '.divx', '.xvid', '.ogv'
+    }
+    
+    file_path = Path(file_path)
+    return file_path.suffix.lower() in video_extensions
+
+
+def is_audio_file(file_path: Union[str, Path]) -> bool:
+    """
+    检查文件是否为音频文件
+    
+    Args:
+        file_path: 文件路径
+        
+    Returns:
+        是否为音频文件
+    """
+    audio_extensions = {'.mp3', '.wav', '.m4a', '.flac', '.aac', '.ogg', '.wma'}
+    
+    file_path = Path(file_path)
+    return file_path.suffix.lower() in audio_extensions
 
 
 def count_chinese_words(text: str) -> int:
@@ -331,29 +439,75 @@ def _correct_text_with_dashscope(text: str, config: Dict[str, Any]) -> str:
         return text
 
 
-def _process_single_audio_worker(audio_path: str, config: Dict[str, Any]) -> Dict[str, Any]:
+def _process_single_audio_worker(media_path: str, config: Dict[str, Any]) -> Dict[str, Any]:
     """
-    独立的工作进程函数，用于处理单个音频文件
+    独立的工作进程函数，用于处理单个音频或视频文件
     
     Args:
-        audio_path: 音频文件路径
+        media_path: 音频或视频文件路径
         config: 配置字典
         
     Returns:
         处理结果字典
     """
-    audio_path = Path(audio_path)
+    input_path = Path(media_path)
     
-    if not audio_path.exists():
+    if not input_path.exists():
         return {
-            'source_file': str(audio_path),
-            'file_name': audio_path.name,
+            'source_file': str(input_path),
+            'file_name': input_path.name,
             'transcription': '',
             'processing_time': 0,
             'timestamp': datetime.now().isoformat(),
             'status': 'error',
-            'error': f"音频文件不存在: {audio_path}",
+            'error': f"文件不存在: {input_path}",
             'metadata': {}
+        }
+    
+    original_file_path = input_path
+    extracted_audio_path = None
+    
+    # 检查输入文件类型并进行相应处理
+    if is_video_file(input_path):
+        try:
+            # 从视频提取音频
+            extracted_audio_path = extract_audio_from_video(
+                input_path, 
+                output_dir=input_path.parent / "extracted_audios",
+                audio_quality=config.get('video_audio_quality', '4')
+            )
+            audio_path = extracted_audio_path
+        except Exception as e:
+            return {
+                'source_file': str(original_file_path),
+                'file_name': original_file_path.name,
+                'transcription': '',
+                'processing_time': 0,
+                'timestamp': datetime.now().isoformat(),
+                'status': 'error',
+                'error': f"视频音频提取失败: {str(e)}",
+                'metadata': {
+                    'input_type': 'video',
+                    'extraction_attempted': True,
+                    'extraction_successful': False
+                }
+            }
+    elif is_audio_file(input_path):
+        audio_path = input_path
+    else:
+        supported_formats = "支持的格式: 音频(.mp3, .wav, .m4a, .flac, .aac, .ogg, .wma) 和视频(.mp4, .avi, .mkv, .mov等)"
+        return {
+            'source_file': str(original_file_path),
+            'file_name': original_file_path.name,
+            'transcription': '',
+            'processing_time': 0,
+            'timestamp': datetime.now().isoformat(),
+            'status': 'error',
+            'error': f"不支持的文件格式: {input_path.suffix}。{supported_formats}",
+            'metadata': {
+                'input_type': 'unsupported',
+                'file_extension': input_path.suffix
+            }
         }
     
     try:
@@ -425,6 +579,8 @@ def _process_single_audio_worker(audio_path: str, config: Dict[str, Any]) -> Dic
             'source_file': str(audio_path),
             'file_name': audio_path.name,
             'file_size': audio_path.stat().st_size,
+            'original_source_file': str(original_file_path),
+            'original_file_name': original_file_path.name,
             'transcription': text,  # 这里已经是纠错后的文本
             'processing_time': processing_time,
             'timestamp': datetime.now().isoformat(),
@@ -436,7 +592,11 @@ def _process_single_audio_worker(audio_path: str, config: Dict[str, Any]) -> Dic
                 'audio_duration': estimate_duration(audio_path),
                 'word_count': count_chinese_words(text) if text else 0,
                 'character_count': count_characters(text) if text else 0,
-                'dashscope_correction': correction_info
+                'dashscope_correction': correction_info,
+                'input_type': 'video' if extracted_audio_path else 'audio',
+                'extraction_successful': extracted_audio_path is not None,
+                'extracted_audio_path': str(extracted_audio_path) if extracted_audio_path else None,
+                'audio_quality': config.get('video_audio_quality', '4') if extracted_audio_path else None
             }
         }
         
@@ -446,13 +606,27 @@ def _process_single_audio_worker(audio_path: str, config: Dict[str, Any]) -> Dic
         return {
             'source_file': str(audio_path),
             'file_name': audio_path.name,
+            'original_source_file': str(original_file_path),
+            'original_file_name': original_file_path.name,
             'transcription': '',
             'processing_time': 0,
             'timestamp': datetime.now().isoformat(),
             'status': 'error',
             'error': str(e),
-            'metadata': {}
+            'metadata': {
+                'input_type': 'video' if extracted_audio_path else 'audio',
+                'extraction_successful': extracted_audio_path is not None
+            }
         }
+    finally:
+        # 可选：清理临时提取的音频文件
+        if (extracted_audio_path and 
+            config.get('cleanup_extracted_audio', False) and 
+            extracted_audio_path.exists()):
+            try:
+                extracted_audio_path.unlink()
+            except Exception:
+                pass  # 忽略清理失败
 
 
 class WorkflowSpeechProcessor:
@@ -515,6 +689,9 @@ class WorkflowSpeechProcessor:
             'dashscope_temperature': 0.1,  # 温度参数
             'dashscope_max_tokens': 10000,  # 最大token数
             'dashscope_timeout': 30,  # API超时时间（秒）
+            # 视频处理配置
+            'video_audio_quality': '4',  # 视频音频提取质量 (0-9, 0最高质量，9最低质量)
+            'cleanup_extracted_audio': False,  # 是否清理临时提取的音频文件
         }
     
     def _setup_logger(self) -> logging.Logger:
@@ -559,24 +736,123 @@ class WorkflowSpeechProcessor:
     
     def process_single_audio(self, audio_path: Union[str, Path]) -> Dict[str, Any]:
         """
-        处理单个音频文件（支持智能分割）
+        处理单个音频文件或视频文件（支持智能分割和视频自动提取音频）
         
         Args:
-            audio_path: 音频文件路径
+            audio_path: 音频文件路径或视频文件路径
             
         Returns:
             处理结果字典，包含转写文本和元数据
         """
-        audio_path = Path(audio_path)
+        input_path = Path(audio_path)
         
-        if not audio_path.exists():
-            raise FileNotFoundError(f"音频文件不存在: {audio_path}")
+        if not input_path.exists():
+            raise FileNotFoundError(f"文件不存在: {input_path}")
         
-        # 检查是否需要智能分割
-        if self._should_segment_audio(audio_path):
-            return self._process_audio_with_segmentation(audio_path)
+        original_file_path = input_path
+        extracted_audio_path = None
+        
+        # 检查输入文件类型
+        if is_video_file(input_path):
+            self.logger.info(f"检测到视频文件: {input_path.name}，开始提取音频")
+            try:
+                # 从视频提取音频
+                extracted_audio_path = extract_audio_from_video(
+                    input_path, 
+                    output_dir=input_path.parent / "extracted_audios",
+                    audio_quality=self.config.get('video_audio_quality', '4')
+                )
+                audio_path = extracted_audio_path
+                self.logger.info(f"视频音频提取完成: {extracted_audio_path.name}")
+            except Exception as e:
+                self.logger.error(f"视频音频提取失败: {e}")
+                return {
+                    'source_file': str(original_file_path),
+                    'file_name': original_file_path.name,
+                    'transcription': '',
+                    'processing_time': 0,
+                    'timestamp': datetime.now().isoformat(),
+                    'status': 'error',
+                    'error': f"视频音频提取失败: {str(e)}",
+                    'metadata': {
+                        'input_type': 'video',
+                        'extraction_attempted': True,
+                        'extraction_successful': False
+                    }
+                }
+        elif is_audio_file(input_path):
+            self.logger.info(f"检测到音频文件: {input_path.name}")
+            audio_path = input_path
         else:
-            return self._process_audio_directly(audio_path)
+            # 不支持的文件类型
+            supported_formats = "支持的格式: 音频(.mp3, .wav, .m4a, .flac, .aac, .ogg, .wma) 和视频(.mp4, .avi, .mkv, .mov等)"
+            error_msg = f"不支持的文件格式: {input_path.suffix}。{supported_formats}"
+            self.logger.error(error_msg)
+            return {
+                'source_file': str(original_file_path),
+                'file_name': original_file_path.name,
+                'transcription': '',
+                'processing_time': 0,
+                'timestamp': datetime.now().isoformat(),
+                'status': 'error',
+                'error': error_msg,
+                'metadata': {
+                    'input_type': 'unsupported',
+                    'file_extension': input_path.suffix,
+                    'supported_formats': supported_formats
+                }
+            }
+        
+        try:
+            # 处理音频文件
+            if self._should_segment_audio(audio_path):
+                result = self._process_audio_with_segmentation(audio_path)
+            else:
+                result = self._process_audio_directly(audio_path)
+            
+            # 更新结果中的源文件信息
+            result['original_source_file'] = str(original_file_path)
+            result['original_file_name'] = original_file_path.name
+            
+            # 添加视频相关的元数据
+            if extracted_audio_path:
+                result['metadata']['input_type'] = 'video'
+                result['metadata']['extracted_audio_path'] = str(extracted_audio_path)
+                result['metadata']['extraction_successful'] = True
+                result['metadata']['audio_quality'] = self.config.get('video_audio_quality', '4')
+            else:
+                result['metadata']['input_type'] = 'audio'
+                result['metadata']['extraction_successful'] = False
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"文件处理失败: {e}")
+            return {
+                'source_file': str(original_file_path),
+                'file_name': original_file_path.name,
+                'original_source_file': str(original_file_path),
+                'original_file_name': original_file_path.name,
+                'transcription': '',
+                'processing_time': 0,
+                'timestamp': datetime.now().isoformat(),
+                'status': 'error',
+                'error': str(e),
+                'metadata': {
+                    'input_type': 'video' if extracted_audio_path else 'audio',
+                    'extraction_successful': extracted_audio_path is not None
+                }
+            }
+        finally:
+            # 可选：清理临时提取的音频文件
+            if (extracted_audio_path and 
+                self.config.get('cleanup_extracted_audio', False) and 
+                extracted_audio_path.exists()):
+                try:
+                    extracted_audio_path.unlink()
+                    self.logger.info(f"已清理临时音频文件: {extracted_audio_path.name}")
+                except Exception as e:
+                    self.logger.warning(f"清理临时音频文件失败: {e}")
     
     def _process_audio_directly(self, audio_path: Path) -> Dict[str, Any]:
         """
@@ -830,18 +1106,28 @@ class WorkflowSpeechProcessor:
         if not audio_dir.exists():
             raise FileNotFoundError(f"音频目录不存在: {audio_dir}")
         
-        # 获取所有音频文件
-        audio_extensions = {'.mp3', '.wav', '.m4a', '.flac', '.aac', '.ogg'}
-        audio_files = []
+        # 获取所有音频和视频文件
+        audio_extensions = {'.mp3', '.wav', '.m4a', '.flac', '.aac', '.ogg', '.wma'}
+        video_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v',
+                           '.3gp', '.3g2', '.asf', '.rm', '.rmvb', '.vob', '.ts', '.mts',
+                           '.m2ts', '.f4v', '.divx', '.xvid', '.ogv'}
         
+        media_files = []
+        
+        # 查找音频文件
         for ext in audio_extensions:
-            audio_files.extend(audio_dir.rglob(f'*{ext}'))
-            audio_files.extend(audio_dir.rglob(f'*{ext.upper()}'))
+            media_files.extend(audio_dir.rglob(f'*{ext}'))
+            media_files.extend(audio_dir.rglob(f'*{ext.upper()}'))
         
-        audio_files = sorted(audio_files)
+        # 查找视频文件
+        for ext in video_extensions:
+            media_files.extend(audio_dir.rglob(f'*{ext}'))
+            media_files.extend(audio_dir.rglob(f'*{ext.upper()}'))
         
-        if not audio_files:
-            self.logger.warning(f"在目录 {audio_dir} 中未找到音频文件")
+        media_files = sorted(media_files)
+        
+        if not media_files:
+            self.logger.warning(f"在目录 {audio_dir} 中未找到音频或视频文件")
             return {
                 'status': 'no_files_found',
                 'processed_files': [],
@@ -850,26 +1136,30 @@ class WorkflowSpeechProcessor:
                 'failed': 0
             }
         
-        self.logger.info(f"找到 {len(audio_files)} 个音频文件")
+        # 统计文件类型
+        audio_count = sum(1 for f in media_files if is_audio_file(f))
+        video_count = sum(1 for f in media_files if is_video_file(f))
+        
+        self.logger.info(f"找到 {len(media_files)} 个媒体文件 (音频: {audio_count}, 视频: {video_count})")
         
         # 检查是否启用并行处理
         # 对于小文件数量，串行处理可能更快（避免模型加载开销）
         if (self.config.get('parallel_processing', True) and 
-            len(audio_files) > 1 and 
-            len(audio_files) >= 4):  # 只有文件数量>=4时才使用并行
-            return self._process_audio_directory_parallel(audio_files, output_dir)
+            len(media_files) > 1 and 
+            len(media_files) >= 4):  # 只有文件数量>=4时才使用并行
+            return self._process_audio_directory_parallel(media_files, output_dir)
         else:
-            if len(audio_files) > 1:
-                self.logger.info(f"文件数量较少({len(audio_files)})，使用串行处理以避免模型加载开销")
-            return self._process_audio_directory_sequential(audio_files, output_dir)
+            if len(media_files) > 1:
+                self.logger.info(f"文件数量较少({len(media_files)})，使用串行处理以避免模型加载开销")
+            return self._process_audio_directory_sequential(media_files, output_dir)
     
-    def _process_audio_directory_parallel(self, audio_files: List[Path], 
+    def _process_audio_directory_parallel(self, media_files: List[Path], 
                                         output_dir: Path) -> Dict[str, Any]:
         """
-        并行处理音频目录中的所有音频文件
+        并行处理目录中的所有音频和视频文件
         
         Args:
-            audio_files: 音频文件列表
+            media_files: 音频和视频文件列表
             output_dir: 输出目录
             
         Returns:
@@ -881,16 +1171,16 @@ class WorkflowSpeechProcessor:
         max_workers = self.config.get('max_workers')
         if max_workers is None:
             # 统一限制为最多3个进程，无论GPU还是CPU模式
-            max_workers = min(4, len(audio_files))
+            max_workers = min(4, len(media_files))
         else:
             # 如果用户指定了max_workers，也要确保不超过3个
-            max_workers = min(max_workers, 4, len(audio_files))
+            max_workers = min(max_workers, 4, len(media_files))
         
         self.logger.info(f"使用 {max_workers} 个工作进程进行并行处理")
         self.logger.info(f"设备: {self.config.get('device', 'cuda:0')}")
         
         # 准备参数
-        audio_paths = [str(f) for f in audio_files]
+        media_paths = [str(f) for f in media_files]
         
         # 使用进程池进行并行处理
         start_time = time.time()
@@ -898,17 +1188,17 @@ class WorkflowSpeechProcessor:
         
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             # 提交所有任务
-            future_to_audio = {
-                executor.submit(_process_single_audio_worker, audio_path, self.config): audio_path 
-                for audio_path in audio_paths
+            future_to_media = {
+                executor.submit(_process_single_audio_worker, media_path, self.config): media_path 
+                for media_path in media_paths
             }
             
             # 收集结果
             completed_count = 0
             individual_times = []
             
-            for future in as_completed(future_to_audio):
-                audio_path = future_to_audio[future]
+            for future in as_completed(future_to_media):
+                media_path = future_to_media[future]
                 try:
                     result = future.result()
                     results.append(result)
@@ -916,15 +1206,15 @@ class WorkflowSpeechProcessor:
                     
                     if result['status'] == 'success':
                         individual_times.append(result['processing_time'])
-                        self.logger.info(f"完成 [{completed_count}/{len(audio_files)}]: {Path(audio_path).name} (耗时: {result['processing_time']:.2f}s)")
+                        self.logger.info(f"完成 [{completed_count}/{len(media_files)}]: {Path(media_path).name} (耗时: {result['processing_time']:.2f}s)")
                     else:
-                        self.logger.error(f"失败 [{completed_count}/{len(audio_files)}]: {Path(audio_path).name} - {result.get('error', 'Unknown error')}")
+                        self.logger.error(f"失败 [{completed_count}/{len(media_files)}]: {Path(media_path).name} - {result.get('error', 'Unknown error')}")
                         
                 except Exception as e:
-                    self.logger.error(f"处理失败 {audio_path}: {e}")
+                    self.logger.error(f"处理失败 {media_path}: {e}")
                     results.append({
-                        'source_file': audio_path,
-                        'file_name': Path(audio_path).name,
+                        'source_file': media_path,
+                        'file_name': Path(media_path).name,
                         'transcription': '',
                         'processing_time': 0,
                         'timestamp': datetime.now().isoformat(),
@@ -966,7 +1256,7 @@ class WorkflowSpeechProcessor:
         
         batch_result = {
             'status': 'completed',
-            'source_directory': str(audio_files[0].parent),
+            'source_directory': str(media_files[0].parent),
             'output_directory': str(output_dir),
             'processed_files': results,
             'total_files': len(results),
@@ -990,13 +1280,13 @@ class WorkflowSpeechProcessor:
         
         return batch_result
     
-    def _process_audio_directory_sequential(self, audio_files: List[Path], 
+    def _process_audio_directory_sequential(self, media_files: List[Path], 
                                           output_dir: Path) -> Dict[str, Any]:
         """
-        串行处理音频目录中的所有音频文件
+        串行处理目录中的所有音频和视频文件
         
         Args:
-            audio_files: 音频文件列表
+            media_files: 音频和视频文件列表
             output_dir: 输出目录
             
         Returns:
@@ -1008,9 +1298,9 @@ class WorkflowSpeechProcessor:
         results = []
         total_processing_time = 0
         
-        for i, audio_file in enumerate(audio_files, 1):
-            self.logger.info(f"处理进度 [{i}/{len(audio_files)}]: {audio_file.name}")
-            result = self.process_single_audio(audio_file)
+        for i, media_file in enumerate(media_files, 1):
+            self.logger.info(f"处理进度 [{i}/{len(media_files)}]: {media_file.name}")
+            result = self.process_single_audio(media_file)
             results.append(result)
             total_processing_time += result.get('processing_time', 0)
         
@@ -1020,7 +1310,7 @@ class WorkflowSpeechProcessor:
         
         batch_result = {
             'status': 'completed',
-            'source_directory': str(audio_files[0].parent),
+            'source_directory': str(media_files[0].parent),
             'output_directory': str(output_dir),
             'processed_files': results,
             'total_files': len(results),
@@ -1655,6 +1945,14 @@ class WorkflowSpeechProcessor:
         self.logger.info(f"分割段结果合并完成: {successful_segments}/{len(segment_results)} 段成功")
         return merged_result
     
+    def _check_ffmpeg_available(self) -> bool:
+        """检查ffmpeg是否可用"""
+        try:
+            subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return False
+    
     def get_workflow_status(self) -> Dict[str, Any]:
         """获取工作流状态信息"""
         return {
@@ -1665,7 +1963,12 @@ class WorkflowSpeechProcessor:
                 'device': self.config.get('device', 'cuda:0'),
                 'language': self.config.get('language', 'auto')
             },
-            'supported_formats': ['.mp3', '.wav', '.m4a', '.flac', '.aac', '.ogg'],
+            'supported_formats': {
+                'audio': ['.mp3', '.wav', '.m4a', '.flac', '.aac', '.ogg', '.wma'],
+                'video': ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v',
+                         '.3gp', '.3g2', '.asf', '.rm', '.rmvb', '.vob', '.ts', '.mts',
+                         '.m2ts', '.f4v', '.divx', '.xvid', '.ogv']
+            },
             'parallel_processing': {
                 'enabled': self.config.get('parallel_processing', True),
                 'max_workers': self.config.get('max_workers'),
@@ -1689,6 +1992,11 @@ class WorkflowSpeechProcessor:
                 'temperature': self.config.get('dashscope_temperature', 0.1),
                 'max_tokens': self.config.get('dashscope_max_tokens', 10000),
                 'timeout': self.config.get('dashscope_timeout', 30)
+            },
+            'video_extraction': {
+                'ffmpeg_available': self._check_ffmpeg_available(),
+                'video_audio_quality': self.config.get('video_audio_quality', '4'),
+                'cleanup_extracted_audio': self.config.get('cleanup_extracted_audio', False)
             },
             'timestamp': datetime.now().isoformat()
         }
@@ -1764,8 +2072,8 @@ if __name__ == '__main__':
     # 测试示例
     import argparse
     
-    parser = argparse.ArgumentParser(description='工作流语音转文字处理器')
-    parser.add_argument('input', help='输入音频文件或目录')
+    parser = argparse.ArgumentParser(description='工作流语音转文字处理器 (支持音频和视频文件)')
+    parser.add_argument('input', help='输入音频/视频文件或目录')
     parser.add_argument('-o', '--output', help='输出目录')
     # 检测系统类型，在macOS上默认使用CPU
     import platform
@@ -1785,6 +2093,8 @@ if __name__ == '__main__':
     parser.add_argument('--dashscope-temperature', type=float, default=0.1, help='通义千问温度参数')
     parser.add_argument('--dashscope-max-tokens', type=int, default=10000, help='通义千问最大token数')
     parser.add_argument('--dashscope-timeout', type=int, default=30, help='通义千问API超时时间（秒）')
+    parser.add_argument('--video-audio-quality', default='4', help='视频音频提取质量 (0-9, 0最高质量，9最低质量)')
+    parser.add_argument('--cleanup-extracted-audio', action='store_true', help='处理完成后清理临时提取的音频文件')
     
     args = parser.parse_args()
     
@@ -1799,7 +2109,9 @@ if __name__ == '__main__':
         'dashscope_model': args.dashscope_model,
         'dashscope_temperature': args.dashscope_temperature,
         'dashscope_max_tokens': args.dashscope_max_tokens,
-        'dashscope_timeout': args.dashscope_timeout
+        'dashscope_timeout': args.dashscope_timeout,
+        'video_audio_quality': args.video_audio_quality,
+        'cleanup_extracted_audio': args.cleanup_extracted_audio
     }
     
     # 如果只是显示配置，不执行处理
@@ -1829,6 +2141,13 @@ if __name__ == '__main__':
         print(f"温度参数: {status['dashscope_correction']['temperature']}")
         print(f"最大token数: {status['dashscope_correction']['max_tokens']}")
         print(f"超时时间: {status['dashscope_correction']['timeout']}秒")
+        print()
+        print("=== 视频音频提取配置 ===")
+        print(f"ffmpeg可用: {'是' if status['video_extraction']['ffmpeg_available'] else '否'}")
+        print(f"音频质量: {status['video_extraction']['video_audio_quality']} (0-9, 0最高)")
+        print(f"清理临时文件: {'是' if status['video_extraction']['cleanup_extracted_audio'] else '否'}")
+        print(f"支持的音频格式: {', '.join(status['supported_formats']['audio'])}")
+        print(f"支持的视频格式: {', '.join(status['supported_formats']['video'])}")
         sys.exit(0)
     
     print(f"配置信息:")
@@ -1851,6 +2170,8 @@ if __name__ == '__main__':
         print(f"  通义千问温度: {config['dashscope_temperature']}")
         print(f"  通义千问最大token: {config['dashscope_max_tokens']}")
         print(f"  通义千问超时: {config['dashscope_timeout']}秒")
+    print(f"  视频音频提取质量: {config['video_audio_quality']} (0-9)")
+    print(f"  清理临时音频文件: {config['cleanup_extracted_audio']}")
     if config['max_workers']:
         print(f"  最大工作进程数: {config['max_workers']}")
     else:
@@ -1874,4 +2195,15 @@ if __name__ == '__main__':
                 print(f"注意：这是基于估算的串行时间，实际效果需要对比测试验证") 
 
 
+# 使用示例:
+# 处理音频文件:
 # python mp3_to_text.py /Users/eureka/VSCodeProjects/Dianxin/datasets/mp3/test3.mp3 --enable-correction -o /Users/eureka/VSCodeProjects/Dianxin/output/test3
+# python mp3_to_text.py /Users/eureka/VSCodeProjects/Dianxin/datasets/dingling.mp3 --enable-correction -o /Users/eureka/VSCodeProjects/Dianxin/output/dingling
+
+# 处理视频文件:
+# python mp3_to_text.py /path/to/video.mp4 --enable-correction -o /path/to/output
+# python video_to_text.py /Users/eureka/VSCodeProjects/Dianxin/datasets/video --parallel --enable-correction -o /Users/eureka/VSCodeProjects/Dianxin/output
+
+# 视频相关选项:
+# --video-audio-quality 4      # 设置音频提取质量 (0-9, 0最高质量)
+# --cleanup-extracted-audio    # 处理完成后清理临时音频文件
