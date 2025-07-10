@@ -1,0 +1,21 @@
+{
+  "workflow_step": "speech2text",
+  "input_type": "audio",
+  "output_type": "text",
+  "total_files": 1,
+  "successful_files": 1,
+  "total_words": 7014,
+  "total_characters": 7151,
+  "total_audio_duration": 1749.1413333333333,
+  "processing_timestamp": "2025-07-10T15:11:24.379852",
+  "output_structure": "individual_directories",
+  "output_files": {
+    "batch_results": "/Users/eureka/VSCodeProjects/Dianxin/output/batch_results_20250710_151124.json",
+    "all_transcripts_json": "/Users/eureka/VSCodeProjects/Dianxin/output/all_transcripts.json",
+    "all_text_content": "/Users/eureka/VSCodeProjects/Dianxin/output/all_content_20250710_151124.txt",
+    "workflow_metadata": "/Users/eureka/VSCodeProjects/Dianxin/output/workflow_metadata_20250710_151124.json",
+    "individual_directories": [
+      "/Users/eureka/VSCodeProjects/Dianxin/output/dingling"
+    ]
+  }
+}
